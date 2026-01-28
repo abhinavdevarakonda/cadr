@@ -1,29 +1,99 @@
 package analyzer
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/abhinavdevarakonda/maplet/internal/graph"
+)
 
 func Analyze(root string) Result {
-	// Phase 1: FS Scan (Discovery)
 	scan, err := Scan(root)
 	if err != nil {
-		panic(fmt.Sprintf("failed to scan directory: %v", err))
+		panic(fmt.Sprintf("failed scan: %v", err))
 	}
 
-	// Phase 2: Symbols (Definitions)
-	// For now, we only have the Go extractor. 
-	// Later we can dispatch based on file extensions.
 	goExt := &GoExtractor{}
-	symbols, err := goExt.ExtractSymbols(scan.Files)
-	if err != nil {
-		panic(fmt.Sprintf("failed to extract symbols: %v", err))
-	}
+	symbols, _ := goExt.ExtractSymbols(scan.Files)
+	facts, _ := goExt.ExtractFacts(scan.Files)
 
-	// Phase 3: Facts (Interactions)
-	facts, err := goExt.ExtractFacts(scan.Files)
-	if err != nil {
-		panic(fmt.Sprintf("failed to extract facts: %v", err))
-	}
-
-	// Phase 4: Graphs (Synthesis)
 	return Build(scan, symbols, facts)
+}
+
+func Scan(root string) (*ScanResult, error) {
+	res := &ScanResult{Root: root}
+
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if info.Name() == ".git" || info.Name() == "node_modules" {
+				return filepath.SkipDir
+			}
+			res.Directories = append(res.Directories, path)
+			return nil
+		}
+		res.Files = append(res.Files, path)
+		return nil
+	})
+
+	return res, err
+}
+
+func Build(scan *ScanResult, symbols []Symbol, facts []Fact) Result {
+	g := graph.New()
+
+	for _, dir := range scan.Directories {
+		g.AddNode(&graph.Node{ID: dir, Type: graph.DirectoryNode, Name: filepath.Base(dir), Path: dir})
+		if dir != scan.Root {
+			g.AddEdge(filepath.Dir(dir), dir, graph.ContainsEdge)
+		}
+	}
+
+	for _, file := range scan.Files {
+		g.AddNode(&graph.Node{ID: file, Type: graph.FileNode, Name: filepath.Base(file), Path: file})
+		g.AddEdge(filepath.Dir(file), file, graph.ContainsEdge)
+	}
+
+	for _, sym := range symbols {
+		g.AddNode(&graph.Node{ID: sym.ID, Type: graph.FunctionNode, Name: sym.Name, Path: sym.Path})
+		g.AddEdge(sym.Path, sym.ID, graph.ContainsEdge)
+	}
+
+	for _, fact := range facts {
+		caller := findCaller(fact, symbols)
+		callee := findCallee(fact, symbols)
+		if caller != "" && callee != "" {
+			g.AddEdge(caller, callee, graph.CallsEdge)
+		}
+	}
+
+	return Result{Graph: g}
+}
+
+func findCaller(f Fact, symbols []Symbol) string {
+	for _, sym := range symbols {
+		if sym.Path == f.Path && f.Line >= sym.StartLine && f.Line <= sym.EndLine {
+			return sym.ID
+		}
+	}
+	return ""
+}
+
+func findCallee(f Fact, symbols []Symbol) string {
+	for _, sym := range symbols {
+		if sym.Name != f.CalleeName {
+			continue
+		}
+		if filepath.Dir(sym.Path) == filepath.Dir(f.Path) {
+			return sym.ID
+		}
+		if f.CalleeQualifier != "" && strings.Contains(sym.ID, f.CalleeQualifier) {
+			return sym.ID
+		}
+	}
+	return ""
 }

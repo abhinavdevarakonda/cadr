@@ -1,37 +1,19 @@
 <!DOCTYPE html>
 <html>
+
 <head>
   <meta charset="utf-8" />
   <title>Maplet</title>
 
   <script src="https://unpkg.com/cytoscape/dist/cytoscape.min.js"></script>
 
-  <style>
-    body {
-      margin: 0;
-      font-family: sans-serif;
-    }
-
-    #toolbar {
-      padding: 8px;
-      border-bottom: 1px solid #ddd;
-      background: #f7f7f7;
-    }
-
-    #cy {
-      width: 100vw;
-      height: calc(100vh - 40px);
-    }
-
-    button {
-      margin-right: 8px;
-    }
-  </style>
+  <link rel="stylesheet" href="style.css">
 </head>
+
 <body>
 
   <div id="toolbar">
-    <button id="structureBtn">Structure View</button>
+    <button id="structureBtn" class="active">Structure View</button>
     <button id="callBtn">Call View</button>
   </div>
 
@@ -51,13 +33,30 @@
         console.error("Failed to load graph:", err);
       });
 
-    document.getElementById("structureBtn").onclick = renderStructure;
-    document.getElementById("callBtn").onclick = renderCall;
+    const structureBtn = document.getElementById("structureBtn");
+    const callBtn = document.getElementById("callBtn");
+
+    structureBtn.onclick = () => {
+      setActive(structureBtn);
+      renderStructure();
+    };
+
+    callBtn.onclick = () => {
+      setActive(callBtn);
+      renderCall();
+    };
+
+    function setActive(btn) {
+      structureBtn.classList.remove("active");
+      callBtn.classList.remove("active");
+      btn.classList.add("active");
+    }
 
     function renderStructure() {
       const elements = [];
+      const nodes = Object.values(graphData.nodes);
 
-      for (const n of graphData.nodes) {
+      for (const n of nodes) {
         elements.push({
           data: {
             id: n.id,
@@ -68,13 +67,15 @@
       }
 
       for (const e of graphData.edges) {
-        elements.push({
-          data: {
-            source: e.from,
-            target: e.to,
-            type: e.type
-          }
-        });
+        if (e.type === "contains") {
+          elements.push({
+            data: {
+              source: e.from,
+              target: e.to,
+              type: e.type
+            }
+          });
+        }
       }
 
       draw(elements, "breadthfirst");
@@ -82,28 +83,35 @@
 
     function renderCall() {
       const elements = [];
-      const seen = new Set();
-      const callEdges = graphData.callEdges || [];
+      const nodes = Object.values(graphData.nodes);
+
+      // Only include functions for call view (and files if we want context)
+      // For now, let's keep it focus on functions that are part of call edges
+      const callEdges = graphData.edges.filter(e => e.type === "calls");
+      const functionalNodeIds = new Set();
+      callEdges.forEach(e => {
+        functionalNodeIds.add(e.from);
+        functionalNodeIds.add(e.to);
+      });
+
+      for (const n of nodes) {
+        if (functionalNodeIds.has(n.id)) {
+          elements.push({
+            data: {
+              id: n.id,
+              label: n.name,
+              type: n.type
+            }
+          });
+        }
+      }
 
       for (const e of callEdges) {
-        if (!seen.has(e.from)) {
-          elements.push({
-            data: { id: e.from, label: e.from }
-          });
-          seen.add(e.from);
-        }
-
-        if (!seen.has(e.to)) {
-          elements.push({
-            data: { id: e.to, label: e.to }
-          });
-          seen.add(e.to);
-        }
-
         elements.push({
           data: {
             source: e.from,
-            target: e.to
+            target: e.to,
+            type: e.type
           }
         });
       }
@@ -125,32 +133,59 @@
             selector: "node",
             style: {
               "label": "data(label)",
-              "font-size": 10,
-              "background-color": "#666",
+              "font-size": 11,
+              "background-color": "#007aff",
               "text-valign": "center",
               "text-halign": "center",
-              "color": "#000"
+              "color": "#fff",
+              "width": 40,
+              "height": 40,
+              "text-outline-width": 1,
+              "text-outline-color": "#007aff"
             }
+          },
+          {
+            selector: "node[type='directory']",
+            style: { "background-color": "#34c759", "text-outline-color": "#34c759", "shape": "round-rectangle" }
+          },
+          {
+            selector: "node[type='file']",
+            style: { "background-color": "#5856d6", "text-outline-color": "#5856d6", "shape": "rectangle" }
+          },
+          {
+            selector: "node[type='function']",
+            style: { "background-color": "#ff9500", "text-outline-color": "#ff9500" }
           },
           {
             selector: "edge",
             style: {
-              "width": 1,
-              "line-color": "#999",
-              "target-arrow-color": "#999",
-              "target-arrow-shape": "triangle"
+              "width": 2,
+              "line-color": "#dcdcdc",
+              "target-arrow-color": "#dcdcdc",
+              "target-arrow-shape": "triangle",
+              "curve-style": "bezier"
+            }
+          },
+          {
+            selector: "edge[type='calls']",
+            style: {
+              "line-color": "#ff3b30",
+              "target-arrow-color": "#ff3b30",
+              "line-style": "dashed"
             }
           }
         ],
 
         layout: {
           name: layoutName,
-          padding: 20
+          padding: 30,
+          animate: true,
+          animationDuration: 500
         }
       });
     }
   </script>
 
 </body>
-</html>
 
+</html>

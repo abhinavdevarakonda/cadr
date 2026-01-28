@@ -9,25 +9,28 @@ const (
 )
 
 type Node struct {
-	ID   string
-	Type NodeType
-	Name string
-	Path string
+	ID   string   `json:"id"`
+	Type NodeType `json:"type"`
+	Name string   `json:"name"`
+	Path string   `json:"path"`
 }
 
 type EdgeType string
 
-const ContainsEdge EdgeType = "contains"
+const (
+	ContainsEdge EdgeType = "contains"
+	CallsEdge    EdgeType = "calls"
+)
 
 type Edge struct {
-	From string
-	To   string
-	Type EdgeType
+	From string   `json:"from"`
+	To   string   `json:"to"`
+	Type EdgeType `json:"type"`
 }
 
 type Graph struct {
-	Nodes map[string]*Node
-	Edges []*Edge
+	Nodes map[string]*Node `json:"nodes"`
+	Edges []*Edge          `json:"edges"`
 }
 
 func New() *Graph {
