@@ -2,6 +2,7 @@ package golang
 
 import (
 	"github.com/abhinavdevarakonda/maplet/internal/lang"
+	"github.com/abhinavdevarakonda/maplet/internal/lang/treesitter"
 	"github.com/abhinavdevarakonda/maplet/internal/types"
 )
 
@@ -16,11 +17,13 @@ func (g *GoLang) Extensions() []string {
 }
 
 func (g *GoLang) ExtractSymbols(files []string) ([]types.Symbol, error) {
-	goExt := &GoExtractor{}
-	return goExt.ExtractSymbols(files)
+	config := NewGoConfig()
+	extractor := treesitter.NewBaseExtractor(config)
+	return extractor.ExtractSymbols(files)
 }
 
 func (g *GoLang) ExtractFacts(files []string) ([]types.Fact, error) {
-	goExt := &GoExtractor{}
-	return goExt.ExtractFacts(files)
+	config := NewGoConfig()
+	extractor := treesitter.NewBaseExtractor(config)
+	return extractor.ExtractFacts(files)
 }

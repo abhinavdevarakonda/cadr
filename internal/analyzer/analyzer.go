@@ -116,6 +116,9 @@ func findCaller(f types.Fact, symbols []types.Symbol) string {
 }
 
 func findCallee(f types.Fact, symbols []types.Symbol) string {
+	var candidates []types.Symbol
+
+	// first pass, collect all matching names
 	for _, sym := range symbols {
 		if sym.Name != f.CalleeName {
 			continue
@@ -125,9 +128,29 @@ func findCallee(f types.Fact, symbols []types.Symbol) string {
 			continue
 		}
 
-		return sym.ID
+		candidates = append(candidates, sym)
 	}
-	return ""
+
+	if len(candidates) == 0 {
+		return ""
+	}
+
+	// if only one candidate, return it
+	if len(candidates) == 1 {
+		return candidates[0].ID
+	}
+
+	// prefer symbols from same package/dir as caller
+	// handles same package calls better
+	callerDir := filepath.Dir(f.Path)
+	for _, sym := range candidates {
+		if filepath.Dir(sym.Path) == callerDir {
+			return sym.ID
+		}
+	}
+
+	// fallback, return first match
+	return candidates[0].ID
 }
 
 

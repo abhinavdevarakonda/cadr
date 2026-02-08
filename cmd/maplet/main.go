@@ -9,6 +9,7 @@ import (
 	"github.com/abhinavdevarakonda/maplet/internal/analyzer"
 	"github.com/abhinavdevarakonda/maplet/internal/server"
 	_ "github.com/abhinavdevarakonda/maplet/internal/lang/golang"
+	_ "github.com/abhinavdevarakonda/maplet/internal/lang/c"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
