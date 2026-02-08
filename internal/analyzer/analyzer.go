@@ -74,21 +74,60 @@ func Scan(root string) (*ScanResult, error) {
 func Build(scan *ScanResult, symbols []types.Symbol, facts []types.Fact) Result {
 	g := graph.New()
 
+	// all paths inside the graph must be relative to project root
+	normalize := func(p string) string {
+		rel, err := filepath.Rel(scan.Root, p)
+		if err != nil {
+			return p
+		}
+		if rel == "" {
+			return "."
+		}
+		return rel
+	}
+
+	// directories
 	for _, dir := range scan.Directories {
-		g.AddNode(&graph.Node{ID: dir, Type: graph.DirectoryNode, Name: filepath.Base(dir), Path: dir})
-		if dir != scan.Root {
-			g.AddEdge(filepath.Dir(dir), dir, graph.ContainsEdge)
+		d := normalize(dir)
+
+		g.AddNode(&graph.Node{
+			ID:   d,
+			Type: graph.DirectoryNode,
+			Name: filepath.Base(d),
+			Path: d,
+		})
+
+		if d != "." {
+			g.AddEdge(filepath.Dir(d), d, graph.ContainsEdge)
 		}
 	}
 
+	// files
 	for _, file := range scan.Files {
-		g.AddNode(&graph.Node{ID: file, Type: graph.FileNode, Name: filepath.Base(file), Path: file})
-		g.AddEdge(filepath.Dir(file), file, graph.ContainsEdge)
+		f := normalize(file)
+
+		g.AddNode(&graph.Node{
+			ID:   f,
+			Type: graph.FileNode,
+			Name: filepath.Base(f),
+			Path: f,
+		})
+
+		g.AddEdge(filepath.Dir(f), f, graph.ContainsEdge)
 	}
 
+	// functions (symbols)
 	for _, sym := range symbols {
-		g.AddNode(&graph.Node{ID: sym.ID, Type: graph.FunctionNode, Name: sym.Name, Path: sym.Path})
-		g.AddEdge(sym.Path, sym.ID, graph.ContainsEdge)
+		p := normalize(sym.Path)
+
+		g.AddNode(&graph.Node{
+			ID:   sym.ID,
+			Type: graph.FunctionNode,
+			Name: sym.Name,
+			Path: p,
+		})
+
+		g.AddEdge(p, sym.ID, graph.ContainsEdge)
 	}
 
 	for _, fact := range facts {
@@ -101,6 +140,7 @@ func Build(scan *ScanResult, symbols []types.Symbol, facts []types.Fact) Result 
 
 	return Result{Graph: g}
 }
+
 
 func findCaller(f types.Fact, symbols []types.Symbol) string {
 	for _, sym := range symbols {

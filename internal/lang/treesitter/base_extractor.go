@@ -10,29 +10,30 @@ import (
 
 type BaseExtractor struct {
 	config LanguageConfig
+	language *sitter.Language
 }
 
 // creates a new extractor with the given language config
 func NewBaseExtractor(config LanguageConfig) *BaseExtractor {
-	return &BaseExtractor{config: config}
+	return &BaseExtractor{
+		config: config,
+		language: config.Grammar(),
+	}
 }
 
 func (e *BaseExtractor) ExtractSymbols(files []string) ([]types.Symbol, error) {
 	var allSymbols []types.Symbol
 
-	parser := sitter.NewParser()
-	parser.SetLanguage(e.config.Grammar())
-
 	queryStr := e.config.SymbolQuery()
 	
-	query, err := sitter.NewQuery([]byte(queryStr), e.config.Grammar())
+	query, err := sitter.NewQuery([]byte(queryStr), e.language)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compile symbol query: %w", err)
 	}
 	defer query.Close()
 
 	for _, path := range files {
-		symbols, err := e.extractSymbolsFromFile(parser, query, path)
+		symbols, err := e.extractSymbolsFromFile(query, path)
 		if err != nil {
 			// log error but continue processing other files
 			fmt.Printf("Warning: failed to extract symbols from %s: %v\n", path, err)
@@ -47,17 +48,14 @@ func (e *BaseExtractor) ExtractSymbols(files []string) ([]types.Symbol, error) {
 func (e *BaseExtractor) ExtractFacts(files []string) ([]types.Fact, error) {
 	var allFacts []types.Fact
 
-	parser := sitter.NewParser()
-	parser.SetLanguage(e.config.Grammar())
-
-	query, err := sitter.NewQuery([]byte(e.config.FactQuery()), e.config.Grammar())
+	query, err := sitter.NewQuery([]byte(e.config.FactQuery()), e.language)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compile fact query: %w", err)
 	}
 	defer query.Close()
 
 	for _, path := range files {
-		facts, err := e.extractFactsFromFile(parser, query, path)
+		facts, err := e.extractFactsFromFile(query, path)
 		if err != nil {
 			// log error but continue processing other files
 			fmt.Printf("Warning: failed to extract facts from %s: %v\n", path, err)
@@ -69,7 +67,10 @@ func (e *BaseExtractor) ExtractFacts(files []string) ([]types.Fact, error) {
 	return allFacts, nil
 }
 
-func (e *BaseExtractor) extractSymbolsFromFile(parser *sitter.Parser, query *sitter.Query, path string) ([]types.Symbol, error) {
+func (e *BaseExtractor) extractSymbolsFromFile(query *sitter.Query, path string) ([]types.Symbol, error) {
+	parser := sitter.NewParser()
+	parser.SetLanguage(e.language)
+
 	source, err := readFile(path)
 	if err != nil {
 		return nil, err
@@ -80,22 +81,23 @@ func (e *BaseExtractor) extractSymbolsFromFile(parser *sitter.Parser, query *sit
 		return nil, fmt.Errorf("parse error: %w", err)
 	}
 	defer tree.Close()
-
 	qc := sitter.NewQueryCursor()
 	defer qc.Close()
-
 	qc.Exec(query, tree.RootNode())
-
 	var symbols []types.Symbol
-	matchCount := 0
+
 	for {
 		match, ok := qc.NextMatch()
 		if !ok {
 			break
 		}
-		matchCount++
 
 		for _, capture := range match.Captures {
+			name := query.CaptureNameForId(capture.Index)
+			if name != "function" {
+				continue
+			}
+
 			symbol, err := e.config.NodeToSymbol(capture.Node, source, path)
 			if err != nil {
 				continue
@@ -109,7 +111,11 @@ func (e *BaseExtractor) extractSymbolsFromFile(parser *sitter.Parser, query *sit
 	return symbols, nil
 }
 
-func (e *BaseExtractor) extractFactsFromFile(parser *sitter.Parser, query *sitter.Query, path string) ([]types.Fact, error) {
+
+func (e *BaseExtractor) extractFactsFromFile(query *sitter.Query, path string) ([]types.Fact, error) {
+	parser := sitter.NewParser()
+	parser.SetLanguage(e.language)
+
 	source, err := readFile(path)
 	if err != nil {
 		return nil, err
@@ -120,13 +126,11 @@ func (e *BaseExtractor) extractFactsFromFile(parser *sitter.Parser, query *sitte
 		return nil, fmt.Errorf("parse error: %w", err)
 	}
 	defer tree.Close()
-
 	qc := sitter.NewQueryCursor()
 	defer qc.Close()
-
 	qc.Exec(query, tree.RootNode())
-
 	var facts []types.Fact
+
 	for {
 		match, ok := qc.NextMatch()
 		if !ok {
@@ -134,6 +138,11 @@ func (e *BaseExtractor) extractFactsFromFile(parser *sitter.Parser, query *sitte
 		}
 
 		for _, capture := range match.Captures {
+			name := query.CaptureNameForId(capture.Index)
+			if name != "call" {
+				continue
+			}
+
 			fact, err := e.config.NodeToFact(capture.Node, source, path)
 			if err != nil {
 				continue
@@ -146,3 +155,4 @@ func (e *BaseExtractor) extractFactsFromFile(parser *sitter.Parser, query *sitte
 
 	return facts, nil
 }
+

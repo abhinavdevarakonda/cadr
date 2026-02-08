@@ -6,44 +6,16 @@ import (
 	"os"
 
 	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/golang"
+	tree_sitter_c "github.com/smacker/go-tree-sitter/c"
 )
 
 func main() {
-	src, _ := os.ReadFile("internal/analyzer/analyzer.go")
-
 	parser := sitter.NewParser()
-	parser.SetLanguage(golang.GetLanguage())
+	parser.SetLanguage(tree_sitter_c.GetLanguage())
 
-	ctx := context.Background()
-	tree, err := parser.ParseCtx(ctx, nil, src)
-	if err != nil {
-		panic(err)
-	}
+	src, _ := os.ReadFile("test.c") // any C file
+	tree, _ := parser.ParseCtx(context.Background(), nil, src)
 
-	root := tree.RootNode()
-
-	query,  err := sitter.NewQuery([]byte(`
-	(function_declaration
-	name: (identifier) @name)
-	`), golang.GetLanguage())
-	if err != nil  {
-		panic(err)
-	}
-
-	qc := sitter.NewQueryCursor()
-	qc.Exec(query, root)
-
-	for {
-		match, ok := qc.NextMatch()
-		if !ok {
-			break
-		}
-		for _, c := range match.Captures {
-			node := c.Node
-			name := src[node.StartByte():node.EndByte()]
-			fmt.Println("Function:", string(name))
-		}
-	}
-
+	fmt.Println(tree.RootNode().String())
 }
+

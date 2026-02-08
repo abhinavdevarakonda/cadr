@@ -22,31 +22,30 @@ func (c *CConfig) Grammar() *sitter.Language {
 
 func (c *CConfig) SymbolQuery() string {
 	return `
-		(function_definition
+	(
+		function_definition
+			type: (_)
 			declarator: (function_declarator
-				declarator: (identifier) @func.name)) @function
-
-		(function_definition
-			declarator: (function_declarator
-				declarator: (pointer_declarator
-					declarator: (identifier) @func.name))) @function
+				declarator: (identifier) @func.name
+				parameters: (_)
+			)
+			body: (_)
+	) @function
 	`
 }
 
 func (c *CConfig) FactQuery() string {
 	return `
-		(call_expression
-			function: [
-				(identifier) @call.name
-				(field_expression
-					argument: (_)
-					field: (field_identifier) @call.name)
-			]) @call
+	(
+		call_expression
+			function: (identifier) @call
+			arguments: (_)
+	) @call
 	`
 }
 
 func (c *CConfig) NodeToSymbol(node *sitter.Node, source []byte, path string) (*types.Symbol, error) {
-	if node.Type() != "function" {
+	if node.Type() != "function_definition" {
 		return nil, fmt.Errorf("expected function node, got %s", node.Type())
 	}
 
@@ -99,7 +98,7 @@ func (c *CConfig) findIdentifierInDeclarator(node *sitter.Node, source []byte) s
 }
 
 func (c *CConfig) NodeToFact(node *sitter.Node, source []byte, path string) (*types.Fact, error) {
-	if node.Type() != "call" {
+	if node.Type() != "call_expression" {
 		return nil, fmt.Errorf("expected call node, got %s", node.Type())
 	}
 

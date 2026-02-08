@@ -21,17 +21,15 @@ func (c *GoConfig) Grammar() *sitter.Language {
 
 func (c *GoConfig) SymbolQuery() string {
 	return `
-		(function_declaration
-			(identifier) @func.name) @function
+	(
+		function_declaration
+			name: (identifier) @func.name
+	) @function
 
-		(method_declaration
-			(parameter_list
-				(parameter_declaration
-					type: [
-						(type_identifier) @receiver.type
-						(pointer_type (type_identifier) @receiver.type)
-					]))
-			(field_identifier) @method.name) @method
+	(
+		method_declaration
+		name: (field_identifier) @func.name
+	) @function
 	`
 }
 
