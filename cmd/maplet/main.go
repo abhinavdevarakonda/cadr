@@ -7,10 +7,11 @@ import (
 	"os"
 
 	"github.com/abhinavdevarakonda/maplet/internal/analyzer"
+	_ "github.com/abhinavdevarakonda/maplet/internal/lang/c"
+	_ "github.com/abhinavdevarakonda/maplet/internal/lang/golang"
+	_ "github.com/abhinavdevarakonda/maplet/internal/lang/python"
 	"github.com/abhinavdevarakonda/maplet/internal/server"
 	"github.com/abhinavdevarakonda/maplet/internal/tui"
-	_ "github.com/abhinavdevarakonda/maplet/internal/lang/golang"
-	_ "github.com/abhinavdevarakonda/maplet/internal/lang/c"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
@@ -58,7 +59,7 @@ func main() {
 		if err := srv.Start("localhost:6767"); err != nil {
 			panic(err)
 		}
-	
+
 	case "nav", "navigate", "tui":
 		result := analyzer.Analyze(path)
 		if err := tui.Start(result.Graph); err != nil {
