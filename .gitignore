@@ -1,1 +1,9 @@
+# Binaries
+maplet
+
+# Temporary/Scratch files
+scratch/
 mcp.md
+
+# OS files
+.DS_Store
