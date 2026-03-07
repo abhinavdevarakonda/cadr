@@ -369,13 +369,22 @@ func (m Model) View() string {
 		indentStr := strings.Repeat("  ", item.Depth)
 
 		var icon string
-		if item.HasC {
+		switch item.Type {
+		case graph.DirectoryNode:
 			if m.expanded[item.ID] {
-				icon = "v "
+				icon = "🗁 "
 			} else {
-				icon = "> "
+				icon = "🗀 "
 			}
-		} else {
+		case graph.FileNode:
+			if m.expanded[item.ID] {
+				icon = "🗌 " 
+			} else {
+				icon = "🗋 " 
+			}
+		case graph.FunctionNode:
+			icon = "ƒ " 
+		default:
 			icon = "  "
 		}
 
@@ -451,7 +460,8 @@ func (m Model) View() string {
 				padding = strings.Repeat(" ", 20-nameWidth)
 			}
 
-			line1 := fmt.Sprintf("%s%s %s %s", funcStyle.Render(name), padding, faintStyle.Render("["+filename+"]"), faintStyle.Render(fmt.Sprintf("(line %d)", res.Line)))
+			funcIcon := "ƒ "
+			line1 := fmt.Sprintf("%s%s%s %s %s", funcStyle.Render(funcIcon), funcStyle.Render(name), padding, faintStyle.Render("["+filename+"]"), faintStyle.Render(fmt.Sprintf("(line %d)", res.Line)))
 			lineContent := getSignature(n.Path, res.Line)
 			line2 := "  " + faintStyle.Italic(true).Render(lineContent)
 
