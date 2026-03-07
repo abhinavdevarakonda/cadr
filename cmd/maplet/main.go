@@ -113,7 +113,7 @@ func main() {
 		result := analyzer.Analyze(path)
 
 		srv := server.New(result.Graph)
-		if err := srv.Start("localhost:6767"); err != nil {
+		if err := srv.Start("localhost:6433"); err != nil {
 			panic(err)
 		}
 
