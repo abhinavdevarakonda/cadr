@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -61,16 +62,44 @@ func Run(fullCmd string, onEvent func(Event)) error {
 		}
 	}()
 
-	// 2. Maplet "Hears" the app (Backstage) via Stderr
+	// 2. Maplet "Hears" the app via Stderr
 	scanner := bufio.NewScanner(stderr)
 	for scanner.Scan() {
 		line := scanner.Text()
 		var event Event
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			// Not a trace event? Echo it to the user's stderr so they see logs/errors
+			fmt.Fprintln(os.Stderr, line)
 			continue
 		}
 		onEvent(event)
 	}
 
 	return cmd.Wait()
+}
+
+// Listen starts a TCP server on port 9876 to receive hits from external processes (e.g. Docker, separate terminal).
+func Listen(onEvent func(Event)) error {
+	ln, err := net.Listen("tcp", "localhost:9876")
+	if err != nil {
+		return err
+	}
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			continue
+		}
+
+		go func(c net.Conn) {
+			defer c.Close()
+			scanner := bufio.NewScanner(c)
+			for scanner.Scan() {
+				var event Event
+				if err := json.Unmarshal([]byte(scanner.Text()), &event); err == nil {
+					onEvent(event)
+				}
+			}
+		}(conn)
+	}
 }

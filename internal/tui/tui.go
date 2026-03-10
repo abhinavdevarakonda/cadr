@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/abhinavdevarakonda/maplet/internal/analyzer"
 	"github.com/abhinavdevarakonda/maplet/internal/graph"
+	"github.com/abhinavdevarakonda/maplet/internal/tracer"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -22,8 +24,15 @@ var (
 	faintStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	paneStyle     = lipgloss.NewStyle().Padding(1, 2)
 
-	dirStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("33")) // Blue
-	funcStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("82")) // Green
+	dirStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("33"))             // Blue
+	funcStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))             // Green
+	glowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true) // Yellow
+
+	// Heatmap Styles
+	heatLow     = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))  // Soft Green
+	heatMed     = lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // Warm Orange
+	heatHigh    = lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // Vivid Red
+	heatBlazing = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true).Underline(true)
 )
 
 type Mode string
@@ -31,7 +40,10 @@ type Mode string
 const (
 	ModeImpact Mode = "impact"
 	ModeTrace  Mode = "trace"
+	ModeFlow   Mode = "flow"
 )
+
+type TraceEventMsg tracer.Event
 
 type Model struct {
 	graph         *graph.Graph
@@ -45,6 +57,13 @@ type Model struct {
 	focus         int // 0: left, 1: right
 	rightItems    []analyzer.ImpactResult
 	rightSelected int
+
+	// Flow & Heatmap fields
+	history      []tracer.Event
+	playhead     int
+	isLive       bool
+	isMonitoring bool
+	hitCounts    map[string]int // ID -> count
 }
 
 type TreeItem struct {
@@ -62,6 +81,8 @@ func NewModel(g *graph.Graph) Model {
 		graph:     g,
 		expanded:  make(map[string]bool),
 		rightMode: ModeImpact,
+		isLive:    true,
+		hitCounts: make(map[string]int),
 	}
 
 	// Expand root directory by default (often ".")
@@ -179,6 +200,51 @@ func sortNodes(nodes []*graph.Node) {
 	})
 }
 
+func (m *Model) syncToHistory() {
+	if len(m.history) == 0 || m.playhead >= len(m.history) {
+		return
+	}
+	msg := m.history[m.playhead]
+
+	// 1. Find the node ID in the graph
+	var targetNodeID string
+	for id, n := range m.graph.Nodes {
+		if n.Type == graph.FunctionNode && (n.Name == msg.Name || strings.HasSuffix(msg.Name, "."+n.Name)) && strings.HasSuffix(msg.File, n.Path) {
+			targetNodeID = id
+			break
+		}
+	}
+
+	if targetNodeID != "" {
+		// 2. Auto-Expand all parents
+		curr := targetNodeID
+		for {
+			parentID := ""
+			for _, e := range m.graph.Edges {
+				if e.To == curr && e.Type == graph.ContainsEdge {
+					parentID = e.From
+					break
+				}
+			}
+			if parentID == "" {
+				break
+			}
+			m.expanded[parentID] = true
+			curr = parentID
+		}
+
+		m.refreshTree()
+
+		// 3. Select the item
+		for i, item := range m.items {
+			if item.ID == targetNodeID {
+				m.selected = i
+				break
+			}
+		}
+	}
+}
+
 func getSignature(path string, line int) string {
 	if path == "" || line <= 0 {
 		return ""
@@ -216,8 +282,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selected++
 				}
 			} else {
-				if m.rightSelected < len(m.rightItems)-1 {
-					m.rightSelected++
+				if m.rightMode == ModeFlow {
+					if len(m.history) > 0 && m.playhead < len(m.history)-1 {
+						m.playhead++
+						m.syncToHistory()
+					}
+				} else {
+					if m.rightSelected < len(m.rightItems)-1 {
+						m.rightSelected++
+					}
 				}
 			}
 		case "k", "up":
@@ -226,8 +299,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selected--
 				}
 			} else {
-				if m.rightSelected > 0 {
-					m.rightSelected--
+				if m.rightMode == ModeFlow {
+					if len(m.history) > 0 && m.playhead > 0 {
+						m.playhead--
+						m.isLive = false
+						m.syncToHistory()
+					}
+				} else {
+					if m.rightSelected > 0 {
+						m.rightSelected--
+					}
 				}
 			}
 		case "h", "left":
@@ -275,6 +356,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "t":
 			if m.rightMode == ModeImpact {
 				m.rightMode = ModeTrace
+			} else if m.rightMode == ModeTrace {
+				m.rightMode = ModeFlow
 			} else {
 				m.rightMode = ModeImpact
 			}
@@ -285,7 +368,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, tea.Quit
 				}
 			} else {
-				if len(m.rightItems) > 0 {
+				if m.rightMode == ModeFlow {
+					if len(m.history) > 0 && m.playhead < len(m.history) {
+						hit := m.history[m.playhead]
+						// Resolve hit to node
+						for id, n := range m.graph.Nodes {
+							if n.Type == graph.FunctionNode && (n.Name == hit.Name || strings.HasSuffix(hit.Name, "."+n.Name)) && strings.HasSuffix(hit.File, n.Path) {
+								m.itemToOpen = &TreeItem{
+									ID:   id,
+									Path: n.Path,
+									Line: n.Line,
+								}
+								return m, tea.Quit
+							}
+						}
+					}
+				} else if len(m.rightItems) > 0 {
 					res := m.rightItems[m.rightSelected]
 					n := m.graph.Nodes[res.ID]
 					if n != nil {
@@ -298,6 +396,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
+		case " ":
+			m.isLive = !m.isLive
+		case "H":
+			if len(m.history) > 0 && m.playhead > 0 {
+				m.playhead--
+				m.isLive = false
+				m.syncToHistory()
+			}
+		case "L":
+			if len(m.history) > 0 && m.playhead < len(m.history)-1 {
+				m.playhead++
+				m.syncToHistory()
+			}
+		}
+	case TraceEventMsg:
+		m.history = append(m.history, tracer.Event(msg))
+
+		// Update Heatmap
+		for id, n := range m.graph.Nodes {
+			if n.Type == graph.FunctionNode && (n.Name == msg.Name || strings.HasSuffix(msg.Name, "."+n.Name)) && strings.HasSuffix(msg.File, n.Path) {
+				m.hitCounts[id]++
+				break
+			}
+		}
+
+		if m.isLive {
+			m.playhead = len(m.history) - 1
+			m.syncToHistory()
 		}
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -393,15 +519,50 @@ func (m Model) View() string {
 		case graph.DirectoryNode:
 			nameStyle = dirStyle
 		case graph.FunctionNode:
-			nameStyle = funcStyle
+			// Apply Heatmap Style
+			count := m.hitCounts[item.ID]
+			if count > 100 {
+				nameStyle = heatBlazing
+			} else if count > 20 {
+				nameStyle = heatHigh
+			} else if count > 5 {
+				nameStyle = heatMed
+			} else if count > 0 {
+				nameStyle = heatLow
+			} else {
+				nameStyle = funcStyle
+			}
 		default:
 			nameStyle = textStyle
+		}
+
+		// YELLOW GLOW: Is this the current hit?
+		isHit := false
+		if len(m.history) > 0 && m.playhead < len(m.history) {
+			hit := m.history[m.playhead]
+			if item.Name == hit.Name || strings.HasSuffix(hit.Name, "."+item.Name) {
+				if item.Type == graph.FunctionNode {
+					isHit = true
+				}
+			}
 		}
 
 		content := icon + item.Name
 		line := indentStr + content
 
-		if i == m.selected && m.focus == 0 {
+		if isHit {
+			if i == m.selected && m.focus == 0 {
+				// Combined Highlight: Reverse color or thick mark
+				line = indentStr + glowStyle.Bold(true).Render("▶ "+content)
+			} else {
+				// The glowing active hit should be the boldest version of its heat color
+				baseColor := nameStyle.GetForeground()
+				if baseColor == lipgloss.Color("") {
+					baseColor = lipgloss.Color("220")
+				}
+				line = indentStr + lipgloss.NewStyle().Foreground(baseColor).Bold(true).Background(lipgloss.Color("235")).Render(icon+item.Name)
+			}
+		} else if i == m.selected && m.focus == 0 {
 			// pad to pane width
 			padLen := (halfWidth - 4) - lipgloss.Width(line)
 			if padLen < 0 {
@@ -425,59 +586,57 @@ func (m Model) View() string {
 
 	// 3. Right pane
 	rightLines := make([]string, 0, paneHeight)
-	rightTitle := "Impact (callers)"
-	if m.rightMode == ModeTrace {
+	rightTitle := "Impact"
+	switch m.rightMode {
+	case ModeImpact:
+		rightTitle = "Impact (callers)"
+	case ModeTrace:
 		rightTitle = "Trace (callees)"
+	case ModeFlow:
+		rightTitle = "Flow (sequence)"
 	}
+
 	if m.focus == 1 {
 		rightTitle = "> " + rightTitle
 	}
 	rightLines = append(rightLines, headerStyle.Width(halfWidth-4).Render(rightTitle))
 	rightLines = append(rightLines, "")
 
-	rightStart := 0
-	if paneHeight > 4 && len(m.rightItems) > (paneHeight-4)/2 { // /2 because each item has signature
-		if m.rightSelected > (paneHeight-4)/4 {
-			rightStart = m.rightSelected - (paneHeight-4)/4
+	if m.rightMode == ModeFlow {
+		startHit := 0
+		if len(m.history) > paneHeight-4 {
+			startHit = len(m.history) - (paneHeight - 4)
 		}
-		// logic for scrolling right pane... simplified for now
-	}
-
-	for i := rightStart; i < len(m.rightItems); i++ {
-		if len(rightLines) >= paneHeight-1 {
-			break
-		}
-		res := m.rightItems[i]
-		n := m.graph.Nodes[res.ID]
-
-		if n != nil {
-			filename := filepath.Base(n.Path)
-
-			name := n.Name
-			nameWidth := lipgloss.Width(name)
-			padding := ""
-			if nameWidth < 20 {
-				padding = strings.Repeat(" ", 20-nameWidth)
+		for i := startHit; i < len(m.history); i++ {
+			hit := m.history[i]
+			prefix := "  "
+			if i == m.playhead {
+				prefix = "> "
 			}
-
-			funcIcon := "ƒ "
-			line1 := fmt.Sprintf("%s%s%s %s %s", funcStyle.Render(funcIcon), funcStyle.Render(name), padding, faintStyle.Render("["+filename+"]"), faintStyle.Render(fmt.Sprintf("(line %d)", res.Line)))
-			lineContent := getSignature(n.Path, res.Line)
-			line2 := "  " + faintStyle.Italic(true).Render(lineContent)
-
-			if i == m.rightSelected && m.focus == 1 {
-				padLen := (halfWidth - 4) - lipgloss.Width(line1)
-				if padLen < 0 {
-					padLen = 0
+			line := fmt.Sprintf("%s#%d %s", prefix, i+1, hit.Name)
+			if i == m.playhead {
+				line = glowStyle.Render(line)
+			}
+			rightLines = append(rightLines, line)
+		}
+	} else if len(m.rightItems) > 0 {
+		for i := 0; i < len(m.rightItems); i++ {
+			if len(rightLines) >= paneHeight-1 {
+				break
+			}
+			res := m.rightItems[i]
+			n := m.graph.Nodes[res.ID]
+			if n != nil {
+				filename := filepath.Base(n.Path)
+				line1 := fmt.Sprintf("%s%s %s %s", funcStyle.Render("ƒ "), funcStyle.Render(n.Name), faintStyle.Render("["+filename+"]"), faintStyle.Render(fmt.Sprintf("(line %d)", res.Line)))
+				line2 := "  " + faintStyle.Italic(true).Render(getSignature(n.Path, res.Line))
+				if i == m.rightSelected && m.focus == 1 {
+					line1 = selectedStyle.Render(line1 + strings.Repeat(" ", 15))
 				}
-				line1 = selectedStyle.Render(line1 + strings.Repeat(" ", padLen))
+				rightLines = append(rightLines, line1, line2)
 			}
-
-			rightLines = append(rightLines, line1)
-			rightLines = append(rightLines, line2)
 		}
 	}
-
 	for len(rightLines) < paneHeight {
 		rightLines = append(rightLines, "")
 	}
@@ -488,6 +647,17 @@ func (m Model) View() string {
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
 
 	footerText := " j/k move   h/l expand/focus   i toggle focus   enter open   t trace   q quit"
+	if len(m.history) > 0 {
+		status := ""
+		if m.isMonitoring {
+			status = lipgloss.NewStyle().Foreground(lipgloss.Color("160")).Render("● RECORDING")
+			if !m.isLive {
+				status = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Render("○ PAUSED")
+			}
+			status += " | "
+		}
+		footerText = fmt.Sprintf(" %sHit %d/%d | H/L scrub | Space live | ", status, m.playhead+1, len(m.history)) + footerText
+	}
 	bottomBar := lipgloss.NewStyle().
 		Width(m.width).
 		Border(lipgloss.NormalBorder(), true, false, false, false).
@@ -498,50 +668,107 @@ func (m Model) View() string {
 	return lipgloss.JoinVertical(lipgloss.Top, topBar, panes, bottomBar)
 }
 
-func Start(g *graph.Graph) error {
-	for {
-		m := NewModel(g)
-		p := tea.NewProgram(&m, tea.WithAltScreen())
+func openEditor(item *TreeItem) error {
+	sttyOutput, _ := exec.Command("stty", "-g").Output()
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = "nvim"
+	}
+	var cmd *exec.Cmd
+	if strings.Contains(editor, "vim") || strings.Contains(editor, "nvim") {
+		cmd = exec.Command(editor, fmt.Sprintf("+%d", item.Line), item.Path)
+	} else if strings.Contains(editor, "code") {
+		cmd = exec.Command(editor, "-g", fmt.Sprintf("%s:%d", item.Path, item.Line))
+	} else {
+		cmd = exec.Command(editor, item.Path)
+	}
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error running editor: %v\n", err)
+	}
+	if len(sttyOutput) > 0 {
+		exec.Command("stty", string(sttyOutput)).Run()
+	}
+	return nil
+}
 
-		finalModel, err := p.Run()
+func Start(g *graph.Graph) error {
+	m := NewModel(g)
+
+	// Passive Listening: Nav listens but doesn't error if port is busy (another Maplet might be open)
+	var prog *tea.Program
+	go func() {
+		tracer.Listen(func(e tracer.Event) {
+			if prog != nil {
+				prog.Send(TraceEventMsg(e))
+			}
+		})
+	}()
+
+	for {
+		prog = tea.NewProgram(&m, tea.WithAltScreen())
+		finalModel, err := prog.Run()
 		if err != nil {
 			return err
 		}
-
 		if returnedModel, ok := finalModel.(Model); ok {
-			if returnedModel.itemToOpen != nil {
-				sttyOutput, _ := exec.Command("stty", "-g").Output()
-
-				editor := os.Getenv("EDITOR")
-				if editor == "" {
-					editor = "nvim"
-				}
-
-				var cmd *exec.Cmd
-				if strings.Contains(editor, "vim") || strings.Contains(editor, "nvim") {
-					cmd = exec.Command(editor, fmt.Sprintf("+%d", returnedModel.itemToOpen.Line), returnedModel.itemToOpen.Path)
-				} else if strings.Contains(editor, "code") {
-					cmd = exec.Command(editor, "-g", fmt.Sprintf("%s:%d", returnedModel.itemToOpen.Path, returnedModel.itemToOpen.Line))
-				} else {
-					cmd = exec.Command(editor, returnedModel.itemToOpen.Path)
-				}
-
-				cmd.Stdin = os.Stdin
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-
-				if err := cmd.Run(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error running editor: %v\n", err)
-				}
-
-				if len(sttyOutput) > 0 {
-					exec.Command("stty", string(sttyOutput)).Run()
-				}
-
-				continue // go back to the TUI
+			m = returnedModel
+			if m.itemToOpen != nil {
+				openEditor(m.itemToOpen)
+				m.itemToOpen = nil
+				continue
 			}
 		}
+		return nil
+	}
+}
 
+func StartMonitor(g *graph.Graph, target string) error {
+	m := NewModel(g)
+	m.isMonitoring = true
+	m.rightMode = ModeFlow
+
+	// Active Listening: Error if port is busy
+	var prog *tea.Program
+	go func() {
+		if err := tracer.Listen(func(e tracer.Event) {
+			if prog != nil {
+				prog.Send(TraceEventMsg(e))
+			}
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: monitor could not start on port 9876: %v\n", err)
+			os.Exit(1)
+		}
+	}()
+
+	// Optionally start the target
+	if target != "" {
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			tracer.Run(target, func(e tracer.Event) {
+				if prog != nil {
+					prog.Send(TraceEventMsg(e))
+				}
+			})
+		}()
+	}
+
+	for {
+		prog = tea.NewProgram(&m, tea.WithAltScreen())
+		finalModel, err := prog.Run()
+		if err != nil {
+			return err
+		}
+		if returnedModel, ok := finalModel.(Model); ok {
+			m = returnedModel
+			if m.itemToOpen != nil {
+				openEditor(m.itemToOpen)
+				m.itemToOpen = nil
+				continue
+			}
+		}
 		return nil
 	}
 }

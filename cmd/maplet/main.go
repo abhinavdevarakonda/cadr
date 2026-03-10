@@ -26,6 +26,8 @@ func main() {
 		fmt.Println("	maplet serve <path>")
 		fmt.Println("	maplet mcp <path>")
 		fmt.Println("	maplet nav <path>")
+		fmt.Println("	maplet flow <path>")
+		fmt.Println("	maplet run <command>")
 		return
 	}
 
@@ -125,44 +127,17 @@ func main() {
 		}
 
 	case "flow":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: maplet flow <root_path> <python_file>")
-			return
-		}
-		target := os.Args[3]
-
 		// 1. Static Analysis
 		result := analyzer.Analyze(path)
-		fmt.Printf("--- STATIC ANALYSIS COMPLETE: %d nodes ---\n", len(result.Graph.Nodes))
 
-		// 2. Start Recording
-		fmt.Printf("--- RECORDING FLOW: %s ---\n", target)
-
-		onEvent := func(event tracer.Event) {
-			// Find node in graph that matches this file and name
-			var match *graph.Node
-			for _, n := range result.Graph.Nodes {
-				// Use ID or name + path for matching
-				// For Go, event.Name might include package (e.g. main.alpha)
-				if n.Type == graph.FunctionNode && strings.HasSuffix(event.File, n.Path) &&
-					(n.Name == event.Name || strings.HasSuffix(event.Name, "."+n.Name)) {
-					match = n
-					break
-				}
-			}
-
-			if match != nil {
-				fmt.Printf(" [MAPLET FLOW] Hit Function: %-20s (found in graph: %s)\n", event.Name, match.ID)
-			} else {
-				fmt.Printf(" [MAPLET FLOW] Hit Function: %-20s (internal/unmapped)\n", event.Name)
-			}
+		target := ""
+		if len(os.Args) >= 4 {
+			target = os.Args[3]
 		}
 
-		err := tracer.Run(target, onEvent)
-
-		if err != nil {
-			fmt.Printf("Error during recording: %v\n", err)
-			return
+		// 2. Start Monitor TUI
+		if err := tui.StartMonitor(result.Graph, target); err != nil {
+			panic(err)
 		}
 
 	case "mcp":
@@ -171,6 +146,23 @@ func main() {
 		stdioSrv := mcpserver.NewStdioServer(mcpSrv)
 		if err := stdioSrv.Listen(context.Background(), os.Stdin, os.Stdout); err != nil {
 			panic(err)
+		}
+
+	case "run":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: maplet run <command>")
+			return
+		}
+		cmdStr := os.Args[2]
+		// We don't need a callback here because the tracer itself
+		// (if it's our py_trace) will connect to the local socket
+		// server started by 'maplet flow'.
+		if err := tracer.Run(cmdStr, func(e tracer.Event) {
+			// Fallback: If socket fails, we still see something here
+			fmt.Fprintf(os.Stderr, " [TRACE FALLBACK] %s\n", e.Name)
+		}); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
 		}
 
 	default:
