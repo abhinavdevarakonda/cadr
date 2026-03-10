@@ -8,12 +8,13 @@ import (
 	"strings"
 
 	"github.com/abhinavdevarakonda/maplet/internal/analyzer"
+	"github.com/abhinavdevarakonda/maplet/internal/graph"
 	_ "github.com/abhinavdevarakonda/maplet/internal/lang/c"
 	_ "github.com/abhinavdevarakonda/maplet/internal/lang/golang"
 	_ "github.com/abhinavdevarakonda/maplet/internal/lang/python"
 	"github.com/abhinavdevarakonda/maplet/internal/server"
+	"github.com/abhinavdevarakonda/maplet/internal/tracer"
 	"github.com/abhinavdevarakonda/maplet/internal/tui"
-	"github.com/abhinavdevarakonda/maplet/internal/graph"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
@@ -38,7 +39,7 @@ func main() {
 	switch command {
 	case "analyze":
 		result := analyzer.Analyze(path)
-		g := result.Graph 
+		g := result.Graph
 
 		var functionCount int
 		var callEdgeCount int
@@ -61,7 +62,7 @@ func main() {
 		fmt.Printf("Call edges: %d\n", callEdgeCount)
 		fmt.Printf("Total nodes: %d\n", len(g.Nodes))
 		fmt.Printf("Total edges: %d\n", len(g.Edges))
-	
+
 	case "impact":
 		if len(os.Args) < 3 {
 			fmt.Println("usage: maplet impact [path] <symbol>")
@@ -121,6 +122,47 @@ func main() {
 		result := analyzer.Analyze(path)
 		if err := tui.Start(result.Graph); err != nil {
 			panic(err)
+		}
+
+	case "flow":
+		if len(os.Args) < 4 {
+			fmt.Println("Usage: maplet flow <root_path> <python_file>")
+			return
+		}
+		target := os.Args[3]
+
+		// 1. Static Analysis
+		result := analyzer.Analyze(path)
+		fmt.Printf("--- STATIC ANALYSIS COMPLETE: %d nodes ---\n", len(result.Graph.Nodes))
+
+		// 2. Start Recording
+		fmt.Printf("--- RECORDING FLOW: %s ---\n", target)
+
+		onEvent := func(event tracer.Event) {
+			// Find node in graph that matches this file and name
+			var match *graph.Node
+			for _, n := range result.Graph.Nodes {
+				// Use ID or name + path for matching
+				// For Go, event.Name might include package (e.g. main.alpha)
+				if n.Type == graph.FunctionNode && strings.HasSuffix(event.File, n.Path) &&
+					(n.Name == event.Name || strings.HasSuffix(event.Name, "."+n.Name)) {
+					match = n
+					break
+				}
+			}
+
+			if match != nil {
+				fmt.Printf(" [MAPLET FLOW] Hit Function: %-20s (found in graph: %s)\n", event.Name, match.ID)
+			} else {
+				fmt.Printf(" [MAPLET FLOW] Hit Function: %-20s (internal/unmapped)\n", event.Name)
+			}
+		}
+
+		err := tracer.Run(target, onEvent)
+
+		if err != nil {
+			fmt.Printf("Error during recording: %v\n", err)
+			return
 		}
 
 	case "mcp":

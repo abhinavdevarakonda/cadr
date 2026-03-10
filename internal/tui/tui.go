@@ -34,12 +34,12 @@ const (
 )
 
 type Model struct {
-	graph      *graph.Graph
-	items      []TreeItem
-	expanded   map[string]bool
-	selected   int
-	width      int
-	height     int
+	graph         *graph.Graph
+	items         []TreeItem
+	expanded      map[string]bool
+	selected      int
+	width         int
+	height        int
 	itemToOpen    *TreeItem
 	rightMode     Mode
 	focus         int // 0: left, 1: right
@@ -378,12 +378,12 @@ func (m Model) View() string {
 			}
 		case graph.FileNode:
 			if m.expanded[item.ID] {
-				icon = "🗌 " 
+				icon = "🗌 "
 			} else {
-				icon = "🗋 " 
+				icon = "🗋 "
 			}
 		case graph.FunctionNode:
-			icon = "ƒ " 
+			icon = "ƒ "
 		default:
 			icon = "  "
 		}
