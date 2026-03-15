@@ -22,8 +22,15 @@ type Recording struct {
 	Events []Event
 }
 
-// Run starts a command with the appropriate tracer and streams hits to a callback.
 func Run(fullCmd string, onEvent func(Event)) error {
+	return runCmd(fullCmd, false, onEvent)
+}
+
+func RunLocal(fullCmd string, onEvent func(Event)) error {
+	return runCmd(fullCmd, true, onEvent)
+}
+
+func runCmd(fullCmd string, localOnly bool, onEvent func(Event)) error {
 	parts := strings.Fields(fullCmd)
 	if len(parts) == 0 {
 		return fmt.Errorf("empty command")
@@ -38,6 +45,11 @@ func Run(fullCmd string, onEvent func(Event)) error {
 	} else {
 		// Run exactly what was requested (e.g. "go run app.go")
 		cmd = exec.Command(parts[0], parts[1:]...)
+	}
+
+	cmd.Env = os.Environ()
+	if localOnly {
+		cmd.Env = append(cmd.Env, "MAPLET_LOCAL_ONLY=1")
 	}
 
 	cmd.Stdin = os.Stdin

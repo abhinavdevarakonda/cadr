@@ -5,10 +5,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/abhinavdevarakonda/maplet/internal/analyzer"
 	"github.com/abhinavdevarakonda/maplet/internal/graph"
+	"github.com/abhinavdevarakonda/maplet/internal/tracer"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
@@ -152,6 +154,28 @@ func NewMCPServer(result analyzer.Result) *mcpserver.MCPServer {
 			curr++
 		}
 		return mcp.NewToolResultText(strings.Join(source, "\n")), nil
+	})
+
+	s.AddTool(mcp.NewTool("run_trace",
+		mcp.WithDescription("Run an arbitrary command and trace its function calls dynamically in the background"),
+		mcp.WithString("command", mcp.Description("The shell command to trace, e.g. 'python app.py'"), mcp.Required()),
+	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		command, _ := request.RequireString("command")
+		var traceLog []string
+
+		err := tracer.RunLocal(command, func(e tracer.Event) {
+			traceLog = append(traceLog, fmt.Sprintf("hit: %s at %s:%d", e.Name, filepath.Base(e.File), e.Line))
+		})
+
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to run command: %v", err)), nil
+		}
+
+		if len(traceLog) == 0 {
+			return mcp.NewToolResultText("Command ran but no trace hits were collected."), nil
+		}
+
+		return mcp.NewToolResultText("Execution Trace Sequence:\n" + strings.Join(traceLog, "\n")), nil
 	})
 
 	return s

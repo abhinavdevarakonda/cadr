@@ -68,9 +68,13 @@ def trace_calls(frame, event, arg):
 
 def run_script(path, args=[]):
     """Compiles and executes a Python script with call tracing enabled."""
-    # Start background sender
-    t = threading.Thread(target=_sender_thread, daemon=True)
-    t.start()
+    # start background sender unless we are explicitly doing a local synchronous trace
+    if os.environ.get("MAPLET_LOCAL_ONLY") != "1":
+        t = threading.Thread(target=_sender_thread, daemon=True)
+        t.start()
+    else:
+        # prevent stderr fallbacks from complaining about connection lost in trace_calls
+        _sock_connected.clear()
     
     sys.argv = [path] + args
     
