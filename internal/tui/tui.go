@@ -64,6 +64,7 @@ type Model struct {
 	isLive       bool
 	isMonitoring bool
 	hitCounts    map[string]int // ID -> count
+	rightScroll  int            // Add offset state for Flow pane scrolling
 }
 
 type TreeItem struct {
@@ -418,7 +419,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.rightMode == ModeFlow {
 					if len(m.history) > 0 && m.playhead < len(m.history) {
 						hit := m.history[m.playhead]
-						// Resolve hit to node
+
+						// Try to resolve it perfectly to a known graph node
+						found := false
 						for id, n := range m.graph.Nodes {
 							if n.Type == graph.FunctionNode && (n.Name == hit.Name || strings.HasSuffix(hit.Name, "."+n.Name)) && strings.HasSuffix(hit.File, n.Path) {
 								m.itemToOpen = &TreeItem{
@@ -426,9 +429,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 									Path: n.Path,
 									Line: n.Line,
 								}
-								return m, tea.Quit
+								found = true
+								break
 							}
 						}
+
+						// Fallback: If it's a class or internal Python module not in the static graph, open it anyway!
+						if !found {
+							m.itemToOpen = &TreeItem{
+								ID:   "dynamic-fallback",
+								Path: hit.File,
+								Line: hit.Line,
+							}
+						}
+
+						return m, tea.Quit
 					}
 				} else if len(m.rightItems) > 0 {
 					res := m.rightItems[m.rightSelected]
@@ -650,11 +665,26 @@ func (m Model) View() string {
 	rightLines = append(rightLines, "")
 
 	if m.rightMode == ModeFlow {
-		startHit := 0
-		if len(m.history) > paneHeight-4 {
-			startHit = len(m.history) - (paneHeight - 4)
+		visibleCount := paneHeight - 4
+
+		// 1. Maintain camera tracking bounds
+		if m.playhead < m.rightScroll {
+			m.rightScroll = m.playhead
+		} else if m.playhead >= m.rightScroll+visibleCount {
+			m.rightScroll = m.playhead - visibleCount + 1
 		}
-		for i := startHit; i < len(m.history); i++ {
+
+		// 2. Bound checks
+		if m.rightScroll < 0 {
+			m.rightScroll = 0
+		}
+
+		endHit := m.rightScroll + visibleCount
+		if endHit > len(m.history) {
+			endHit = len(m.history)
+		}
+
+		for i := m.rightScroll; i < endHit; i++ {
 			hit := m.history[i]
 			prefix := "  "
 			if i == m.playhead {

@@ -58,7 +58,11 @@ func Scan(root string) (*ScanResult, error) {
 			return err
 		}
 		if info.IsDir() {
-			if info.Name() == ".git" || info.Name() == "node_modules" {
+			name := info.Name()
+			if name == ".git" || name == "node_modules" ||
+				name == "venv" || name == ".venv" ||
+				name == "env" || name == "__pycache__" ||
+				name == ".tox" {
 				return filepath.SkipDir
 			}
 			res.Directories = append(res.Directories, path)
@@ -121,11 +125,11 @@ func Build(scan *ScanResult, symbols []types.Symbol, facts []types.Fact) Result 
 		p := normalize(sym.Path)
 
 		g.AddNode(&graph.Node{
-			ID:   sym.ID,
-			Type: graph.FunctionNode,
-			Name: sym.Name,
-			Path: p,
-			Line: sym.StartLine,
+			ID:      sym.ID,
+			Type:    graph.FunctionNode,
+			Name:    sym.Name,
+			Path:    p,
+			Line:    sym.StartLine,
 			EndLine: sym.EndLine,
 		})
 

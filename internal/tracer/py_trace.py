@@ -44,6 +44,10 @@ def trace_calls(frame, event, arg):
     # Filter out library calls
     if any(x in filename for x in ["lib/", "site-packages", "<frozen"]):
         return None
+        
+    # Filter out useless internal Python noise
+    if func_name in ["<module>", "<genexpr>", "<listcomp>", "<dictcomp>", "__annotate__", "root"]:
+        return None
     
     # Only trace project files
     if _project_root not in filename:
@@ -66,40 +70,17 @@ def trace_calls(frame, event, arg):
         
     return trace_calls
 
-def run_script(path, args=[]):
-    """Compiles and executes a Python script with call tracing enabled."""
-    # start background sender unless we are explicitly doing a local synchronous trace
+def start():
+    """Initializes the background sender and globally attaches the Maplet trace hook."""
+    # Start background sender unless we are explicitly doing a local synchronous trace
     if os.environ.get("MAPLET_LOCAL_ONLY") != "1":
         t = threading.Thread(target=_sender_thread, daemon=True)
         t.start()
     else:
-        # prevent stderr fallbacks from complaining about connection lost in trace_calls
+        # Prevent stderr fallbacks from complaining about connection lost in trace_calls
         _sock_connected.clear()
     
-    sys.argv = [path] + args
-    
-    # Normalize path to absolute
-    abs_path = os.path.abspath(path)
-    
-    with open(abs_path, 'rb') as f:
-        code = compile(f.read(), abs_path, 'exec')
-    
-    # Start tracing
+    # Attach to the Main Thread
     sys.settrace(trace_calls)
-    try:
-        # Execute in a namespace that looks like __main__
-        global_ns = {
-            "__name__": "__main__",
-            "__file__": abs_path,
-        }
-        exec(code, global_ns)
-    finally:
-        sys.settrace(None)
-        if _sock:
-            _sock.close()
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: py_trace.py <script> [args...]", file=sys.stderr)
-        sys.exit(1)
-    run_script(sys.argv[1], sys.argv[2:])
+    # Attach to all future Threads spawned by this Python process
+    threading.settrace(trace_calls)

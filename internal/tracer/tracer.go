@@ -36,20 +36,27 @@ func runCmd(fullCmd string, localOnly bool, onEvent func(Event)) error {
 		return fmt.Errorf("empty command")
 	}
 
-	var cmd *exec.Cmd
-	// If it's a python command, we wrap it with our tracer script
-	if parts[0] == "python" || parts[0] == "python3" {
-		scriptPath := "/home/abee/code/projects/maplet/internal/tracer/py_trace.py"
-		newArgs := append([]string{scriptPath}, parts[1:]...)
-		cmd = exec.Command(parts[0], newArgs...)
-	} else {
-		// Run exactly what was requested (e.g. "go run app.go")
-		cmd = exec.Command(parts[0], parts[1:]...)
-	}
+	cmd := exec.Command(parts[0], parts[1:]...)
 
 	cmd.Env = os.Environ()
 	if localOnly {
 		cmd.Env = append(cmd.Env, "MAPLET_LOCAL_ONLY=1")
+	}
+
+	// Inject Maplet universal Python hook via PYTHONPATH
+	cmd.Env = append(cmd.Env, "MAPLET_TRACE=1")
+	hookDir := "/home/abee/code/projects/maplet/internal/tracer"
+	pythonPathFound := false
+	for i, env := range cmd.Env {
+		if strings.HasPrefix(env, "PYTHONPATH=") {
+			newPath := hookDir + string(os.PathListSeparator) + strings.TrimPrefix(env, "PYTHONPATH=")
+			cmd.Env[i] = "PYTHONPATH=" + newPath
+			pythonPathFound = true
+			break
+		}
+	}
+	if !pythonPathFound {
+		cmd.Env = append(cmd.Env, "PYTHONPATH="+hookDir)
 	}
 
 	cmd.Stdin = os.Stdin
