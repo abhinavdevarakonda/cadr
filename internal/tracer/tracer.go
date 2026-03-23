@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-//go:embed sitecustomize.py py_trace.py
+// embed sitecustomize.py py_trace.py
 var hookFiles embed.FS
 
 // ensureHookDir unpacks the embedded Python files into a local cache directory
@@ -35,7 +35,6 @@ func ensureHookDir() (string, error) {
 		}
 		destPath := filepath.Join(hookDir, name)
 
-		// Always overwrite to ensure they have the latest version of your tools
 		if err := os.WriteFile(destPath, content, 0644); err != nil {
 			return "", err
 		}
