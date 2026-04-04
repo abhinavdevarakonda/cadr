@@ -4,7 +4,7 @@ maplet
 # Temporary/Scratch files
 scratch/
 mcp.md
-agnostic_roadmap.md
+understanding/
 
 # OS files
 .DS_Store

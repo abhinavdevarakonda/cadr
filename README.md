@@ -1,5 +1,7 @@
 # Maplet
 
+<video src="./maplet-demo.mp4" autoplay loop muted></video>
+
 Maplet is a terminal-native tool that integrates static analysis with dynamic execution tracing. It shows you a real-time map of your codebase's execution flow directly in the terminal. Explore complex application logic and legacy codebases without relying on manual logs, or "KT's" if you're using it at work :p
 
 Maplet has three primary systems:
