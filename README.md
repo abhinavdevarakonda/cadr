@@ -1,13 +1,17 @@
 # Maplet
 
+> Trace your code in real-time
+
 <video src="https://github.com/user-attachments/assets/7d523ad0-d2a6-403e-a879-e9f3cd1344e0" autoplay loop muted></video>
 
-Maplet is a terminal-native tool that integrates static analysis with dynamic execution tracing. It shows you a real-time map of your codebase's execution flow directly in the terminal. Explore complex application logic and legacy codebases without relying on manual logs, or "KT's" if you're using it at work :p
+Maplet is a terminal-native tool that combines static analysis with runtime tracing to show a real-time map of your codebase as it executes. It helps you follow the flow of functions, services, and data directly in your terminal, so you can understand complex systems without piecing things together manually.
+
+Whether you live in the terminal or you've been *burning through too many tokens*. It helps you get through KT sessions, debug messy systems, explore legacy codebases, and figure out what's actually going on without digging through muddled, messy logs.
 
 Maplet has three primary systems:
 1. **Static Analyzer (TreeSitter)**: Parses the project directories to build a weighted structural dependencies graph.
-2. **Dynamic Tracer**: Uses `PYTHONPATH` injection (or `sitecustomize.py`) to hook into target applications, transmitting TCP payloads of your service line-by-line back to the Maplet daemon. Native support for multi-threading, multi-processing, and web subprocesses (Flask, Uvicorn, Django).
-3. **Interactive TUI**: Sticks and follows to the live execution feed, providing a TUI for navigating execution paths chronologically or structurally in a way vim users can appreciate.
+2. **Dynamic Tracer**: Uses `PYTHONPATH` injection (or `sitecustomize.py`) to hook into target applications, transmitting line-by-line execution data over TCP back to the Maplet daemon. Native support for multi-threading, multi-processing, and web subprocesses (Flask, Uvicorn, Django).
+3. **Interactive TUI**: Follows the live execution feed, providing a TUI for navigating execution paths chronologically or structurally in a way vim users can appreciate.
 
 ---
 
