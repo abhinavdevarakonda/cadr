@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/abhinavdevarakonda/maplet/internal/agents"
 	"github.com/abhinavdevarakonda/maplet/internal/analyzer"
 	"github.com/abhinavdevarakonda/maplet/internal/graph"
 	_ "github.com/abhinavdevarakonda/maplet/internal/lang/c"
@@ -17,6 +18,8 @@ import (
 	"github.com/abhinavdevarakonda/maplet/internal/tui"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
+
+var _ = agents.DetectLanguage // reference to avoid unused import
 
 func main() {
 	if len(os.Args) < 2 {
