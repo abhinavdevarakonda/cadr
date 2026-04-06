@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/abhinavdevarakonda/maplet/internal/lang/universal"
 	"github.com/abhinavdevarakonda/maplet/internal/types"
 	sitter "github.com/smacker/go-tree-sitter"
 	tree_sitter_python "github.com/smacker/go-tree-sitter/python"
@@ -20,34 +21,37 @@ func (c *PythonConfig) Grammar() *sitter.Language {
 	return tree_sitter_python.GetLanguage()
 }
 
-// SymbolQuery captures all function_definition nodes.
-// NodeToSymbol handles class context by walking up the parent chain.
 func (c *PythonConfig) SymbolQuery() string {
-	return `
-	(function_definition
-		name: (identifier) @func.name
-	) @function
-	`
+	query, err := universal.LoadSymbolQuery("python")
+	if err != nil {
+		return `
+		(function_definition
+			name: (identifier) @func.name
+		) @function
+		`
+	}
+	return query
 }
 
-// FactQuery captures all call expressions.
 func (c *PythonConfig) FactQuery() string {
-	return `
-	(call
-		function: (identifier) @call.name
-	) @call
+	query, err := universal.LoadFactQuery("python")
+	if err != nil {
+		return `
+		(call
+			function: (identifier) @call.name
+		) @call
 
-	(call
-		function: (attribute
-			object: (_) @call.qualifier
-			attribute: (identifier) @call.name
-		)
-	) @call
-	`
+		(call
+			function: (attribute
+				object: (_) @call.qualifier
+				attribute: (identifier) @call.name
+			)
+		) @call
+		`
+	}
+	return query
 }
 
-// NodeToSymbol converts a tree-sitter node captured as @function into a Symbol.
-// It walks up the parent chain to detect if this function is a method inside a class.
 func (c *PythonConfig) NodeToSymbol(node *sitter.Node, source []byte, path string) (*types.Symbol, error) {
 	if node.Type() != "function_definition" {
 		return nil, nil
@@ -59,8 +63,6 @@ func (c *PythonConfig) NodeToSymbol(node *sitter.Node, source []byte, path strin
 	}
 
 	module := moduleFromPath(path)
-
-	// Walk up to see if this function is inside a class body -> class_definition
 	className := c.enclosingClassName(node, source)
 
 	var id string
@@ -80,7 +82,6 @@ func (c *PythonConfig) NodeToSymbol(node *sitter.Node, source []byte, path strin
 	}, nil
 }
 
-// NodeToFact converts a tree-sitter call node into a Fact.
 func (c *PythonConfig) NodeToFact(node *sitter.Node, source []byte, path string) (*types.Fact, error) {
 	if node.Type() != "call" {
 		return nil, nil
@@ -98,12 +99,10 @@ func (c *PythonConfig) NodeToFact(node *sitter.Node, source []byte, path string)
 	case "identifier":
 		calleeName = funcNode.Content(source)
 	case "attribute":
-		// object.method(...)
 		for i := 0; i < int(funcNode.NamedChildCount()); i++ {
 			child := funcNode.NamedChild(i)
 			switch child.Type() {
 			case "identifier":
-				// first identifier is the object/qualifier
 				if calleeQualifier == "" {
 					calleeQualifier = child.Content(source)
 				} else {
@@ -111,7 +110,6 @@ func (c *PythonConfig) NodeToFact(node *sitter.Node, source []byte, path string)
 				}
 			}
 		}
-		// attribute field is the method name
 		attrNode := funcNode.ChildByFieldName("attribute")
 		if attrNode != nil {
 			calleeName = attrNode.Content(source)
@@ -132,8 +130,6 @@ func (c *PythonConfig) NodeToFact(node *sitter.Node, source []byte, path string)
 	}, nil
 }
 
-// enclosingClassName walks up the parent chain looking for a class_definition node.
-// If found, returns the class name; otherwise returns "".
 func (c *PythonConfig) enclosingClassName(node *sitter.Node, source []byte) string {
 	parent := node.Parent()
 	for parent != nil {
@@ -148,7 +144,6 @@ func (c *PythonConfig) enclosingClassName(node *sitter.Node, source []byte) stri
 	return ""
 }
 
-// childContent finds the first named child of the given type and returns its content.
 func (c *PythonConfig) childContent(node *sitter.Node, childType string, source []byte) string {
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
@@ -159,8 +154,6 @@ func (c *PythonConfig) childContent(node *sitter.Node, childType string, source 
 	return ""
 }
 
-// moduleFromPath gets a module name from a file path by stripping the extension.
-// eg. "src/utils/helpers.py" -> "helpers"
 func moduleFromPath(path string) string {
 	base := filepath.Base(path)
 	ext := filepath.Ext(base)

@@ -2,45 +2,15 @@ package tracer
 
 import (
 	"bufio"
-	"embed"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
+
+	"github.com/abhinavdevarakonda/maplet/internal/agents"
 )
-
-//go:embed sitecustomize.py py_trace.py
-var hookFiles embed.FS
-
-// ensureHookDir unpacks the embedded Python files into a local cache directory
-// so that PYTHONPATH can point to them on any machine.
-func ensureHookDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-
-	hookDir := filepath.Join(home, ".maplet", "hooks")
-	if err := os.MkdirAll(hookDir, 0755); err != nil {
-		return "", err
-	}
-
-	for _, name := range []string{"sitecustomize.py", "py_trace.py"} {
-		content, err := hookFiles.ReadFile(name)
-		if err != nil {
-			return "", err
-		}
-		destPath := filepath.Join(hookDir, name)
-
-		if err := os.WriteFile(destPath, content, 0644); err != nil {
-			return "", err
-		}
-	}
-	return hookDir, nil
-}
 
 type Event struct {
 	Event     string  `json:"event"`
@@ -63,6 +33,16 @@ func RunLocal(fullCmd string, onEvent func(Event)) error {
 }
 
 func runCmd(fullCmd string, localOnly bool, onEvent func(Event)) error {
+	lang := agents.DetectLanguage(fullCmd)
+	if lang == "" {
+		return fmt.Errorf("unsupported language for command: %s", fullCmd)
+	}
+
+	agent, ok := agents.Get(lang)
+	if !ok {
+		return fmt.Errorf("no agent registered for language: %s", lang)
+	}
+
 	parts := strings.Fields(fullCmd)
 	if len(parts) == 0 {
 		return fmt.Errorf("empty command")
@@ -71,30 +51,33 @@ func runCmd(fullCmd string, localOnly bool, onEvent func(Event)) error {
 	cmd := exec.Command(parts[0], parts[1:]...)
 
 	cmd.Env = os.Environ()
+
 	if localOnly {
 		cmd.Env = append(cmd.Env, "MAPLET_LOCAL_ONLY=1")
 	}
 
-	// Inject Maplet universal Python hook via PYTHONPATH
-	cmd.Env = append(cmd.Env, "MAPLET_TRACE=1")
-	cmd.Env = append(cmd.Env, "PYTHONUNBUFFERED=1")
-
-	hookDir, err := ensureHookDir()
+	hookDir, err := agents.SetupHookDir(agent)
 	if err != nil {
-		return fmt.Errorf("failed to setup maplet hooks: %v", err)
+		return fmt.Errorf("failed to setup agent hooks: %v", err)
 	}
 
-	pythonPathFound := false
-	for i, env := range cmd.Env {
-		if strings.HasPrefix(env, "PYTHONPATH=") {
-			newPath := hookDir + string(os.PathListSeparator) + strings.TrimPrefix(env, "PYTHONPATH=")
-			cmd.Env[i] = "PYTHONPATH=" + newPath
-			pythonPathFound = true
-			break
+	if agent.EnvVar != "" {
+		pathFound := false
+		for i, env := range cmd.Env {
+			if strings.HasPrefix(env, agent.EnvVar+"=") {
+				newPath := hookDir + string(os.PathListSeparator) + strings.TrimPrefix(env, agent.EnvVar+"=")
+				cmd.Env[i] = agent.EnvVar + "=" + newPath
+				pathFound = true
+				break
+			}
+		}
+		if !pathFound {
+			cmd.Env = append(cmd.Env, agent.EnvVar+"="+hookDir)
 		}
 	}
-	if !pythonPathFound {
-		cmd.Env = append(cmd.Env, "PYTHONPATH="+hookDir)
+
+	if agent.TraceEnvVar != "" {
+		cmd.Env = append(cmd.Env, agent.TraceEnvVar+"="+agent.TraceEnvValue)
 	}
 
 	cmd.Stdin = os.Stdin
@@ -111,7 +94,6 @@ func runCmd(fullCmd string, localOnly bool, onEvent func(Event)) error {
 		return err
 	}
 
-	// 1. App Output (Stage) - Echo in background
 	go func() {
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
@@ -119,7 +101,6 @@ func runCmd(fullCmd string, localOnly bool, onEvent func(Event)) error {
 		}
 	}()
 
-	// 2. Maplet "Hears" the app via Stderr
 	scanner := bufio.NewScanner(stderr)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -134,7 +115,6 @@ func runCmd(fullCmd string, localOnly bool, onEvent func(Event)) error {
 	return cmd.Wait()
 }
 
-// Listen starts a TCP server on port 9876 to receive hits from external processes (e.g. Docker, separate terminal).
 func Listen(onEvent func(Event)) error {
 	ln, err := net.Listen("tcp", "localhost:9876")
 	if err != nil {
