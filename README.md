@@ -86,20 +86,25 @@ These are the Maplet-specific bindings:
 
 ## Maplet MCP Server
 
-Maplet exposes its static graph and dynamic analysis tools as a Model Context Protocol (MCP) server. Instead of forcing AI assistants (like Claude Code, Cursor, or Antigravity) to blindly `grep` through thousands of files or guess what functions were called based on standard terminal output, Maplet feeds them exact structures and live execution traces. This reduces token usage, prevents the AI from "hallucinating" how code connects, and allows them to debug complex runtime errors instantly.
+Maplet exposes its static graph and dynamic analysis tools as an **MCP (Model Context Protocol)** server. This allows AI assistants (like Claude, Cursor, or Antigravity) to "see" your code structure and follow execution flows without manual grepping.
 
-To use Maplet with your AI agent, add the following to your agent's MCP configuration JSON file:
-> Replace `/absolute/path/to/your/project` with the actual path to your project.
+### Setup
+Add Maplet to your agent's MCP configuration (e.g., `claude_desktop_config.json`). 
+
 ```json
 {
   "mcpServers": {
     "maplet": {
       "command": "maplet",
-      "args": [
-        "mcp",
-        "/absolute/path/to/your/project"
-      ]
+      "args": ["mcp"]
     }
   }
 }
 ```
+
+### AI-Agent Power Tools
+Maplet provides the AI with several high-level tools to understand code deeply:
+- **`find_symbol`**: Locates function definitions across the entire project.
+- **`get_callers / get_callees`**: Shows the immediate "Impact" and "Trace" of a function.
+- **`run_trace`**: Lets the AI execute your code and see the **live call sequence** returned as data.
+- **`set_project_root`**: Allows the AI to autonomously switch its focus to a different project or subdirectory as you move around.

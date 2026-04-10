@@ -15,8 +15,27 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
-func NewMCPServer(result analyzer.Result) *mcpserver.MCPServer {
+func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 	s := mcpserver.NewMCPServer("maplet", "1.0.0")
+
+	// global tool to change the current working project
+	s.AddTool(mcp.NewTool("set_project_root",
+		mcp.WithDescription("Change the target project directory for analysis"),
+		mcp.WithString("path", mcp.Description("Absolute path to the project root"), mcp.Required()),
+	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		newPath, _ := request.RequireString("path")
+		newResult := analyzer.Analyze(newPath)
+		*result = newResult // update shared pointer
+
+		var funcCount int
+		for _, n := range result.Graph.Nodes {
+			if n.Type == graph.FunctionNode {
+				funcCount++
+			}
+		}
+
+		return mcp.NewToolResultText(fmt.Sprintf("Successfully switched to %s. Found %d functions.", newPath, funcCount)), nil
+	})
 
 	s.AddTool(mcp.NewTool("find_symbol",
 		mcp.WithDescription("Find function/symbol IDs by name"),

@@ -145,7 +145,7 @@ func main() {
 
 	case "mcp":
 		result := analyzer.Analyze(path)
-		mcpSrv := server.NewMCPServer(result)
+		mcpSrv := server.NewMCPServer(&result)
 		stdioSrv := mcpserver.NewStdioServer(mcpSrv)
 		if err := stdioSrv.Listen(context.Background(), os.Stdin, os.Stdout); err != nil {
 			panic(err)
