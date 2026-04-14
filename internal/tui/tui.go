@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -1030,15 +1031,22 @@ func (m Model) View() string {
 }
 
 func openEditor(item *TreeItem) error {
-	sttyOutput, _ := exec.Command("stty", "-g").Output()
+	var sttyOutput []byte
+	if runtime.GOOS != "windows" {
+		sttyOutput, _ = exec.Command("stty", "-g").Output()
+	}
 	editor := os.Getenv("EDITOR")
 	if editor == "" {
-		editor = "nvim"
+		if runtime.GOOS == "windows" {
+			editor = "code"
+		} else {
+			editor = "nvim"
+		}
 	}
 	var cmd *exec.Cmd
 	if strings.Contains(editor, "vim") || strings.Contains(editor, "nvim") {
 		cmd = exec.Command(editor, fmt.Sprintf("+%d", item.Line), item.Path)
-	} else if strings.Contains(editor, "code") {
+	} else if strings.Contains(editor, "code") || strings.Contains(editor, "cursor") {
 		cmd = exec.Command(editor, "-g", fmt.Sprintf("%s:%d", item.Path, item.Line))
 	} else {
 		cmd = exec.Command(editor, item.Path)
@@ -1049,7 +1057,7 @@ func openEditor(item *TreeItem) error {
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running editor: %v\n", err)
 	}
-	if len(sttyOutput) > 0 {
+	if runtime.GOOS != "windows" && len(sttyOutput) > 0 {
 		exec.Command("stty", string(sttyOutput)).Run()
 	}
 	return nil

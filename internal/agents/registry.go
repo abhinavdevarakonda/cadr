@@ -4,6 +4,7 @@ import (
 	"embed"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type Agent struct {
@@ -31,7 +32,9 @@ func DetectLanguage(cmd string) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	cmdName := parts[0]
+	// use filepath.Base and strip .exe for cross-platform detection
+	cmdName := strings.ToLower(filepath.Base(parts[0]))
+	cmdName = strings.TrimSuffix(cmdName, ".exe")
 
 	switch cmdName {
 	case "python", "python3", "py":
