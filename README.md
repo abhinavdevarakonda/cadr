@@ -6,16 +6,24 @@ Maplet is a terminal-native tool that integrates static analysis with dynamic ex
 
 Maplet has three primary systems:
 1. **Static Analyzer (TreeSitter)**: Parses the project directories to build a weighted structural dependencies graph.
-2. **Dynamic Tracer**: Uses `PYTHONPATH` injection (or `sitecustomize.py`) to hook into target applications, transmitting TCP payloads of your service line-by-line back to the Maplet daemon. Native support for multi-threading, multi-processing, and web subprocesses (Flask, Uvicorn, Django).
+2. **Dynamic Tracer**: Uses `PYTHONPATH` or `NODE_OPTIONS` injection to hook into target applications, transmitting TCP payloads of your service line-by-line back to the Maplet daemon. Native support for multi-threading, multi-processing, and web subprocesses (Flask, Uvicorn, Express, NestJS).
 3. **Interactive TUI**: Sticks and follows to the live execution feed, providing a TUI for navigating execution paths chronologically or structurally in a way vim users can appreciate.
 
 ---
 
 ## Installation
 
-### Download Binary
+### linux/macOS
+
+#### Download Binary
 Download latest binary from [Github Releases.](https://github.com/abhinavdevarakonda/maplet/releases) 
-### Build from Source
+
+#### go install
+```bash
+go install github.com/abhinavdevarakonda/maplet/cmd/maplet@latest
+```
+
+#### Build from Source
 > Requires a C compiler due to CGO (treesitter)
 ```bash
 git clone https://github.com/abhinavdevarakonda/maplet
@@ -24,15 +32,23 @@ go build -o maplet ./cmd/maplet
 sudo mv maplet /usr/local/bin/ # Add to PATH
 ```
 
-### go install
-```bash
+### Windows
+
+#### WSL (Recommended)
+Follow the Linux instructions inside your WSL terminal.
+
+#### Native PowerShell
+1. **Prerequisite:** Install a C compiler (e.g., `scoop install gcc` or `choco install mingw`).
+2. **Install:**
+```powershell
 go install github.com/abhinavdevarakonda/maplet/cmd/maplet@latest
 ```
+*Note: the TUI would look cleaner and more consistent if using Windows Terminal.*
 
 ---
 
 ## Usage Overview
-> Note: Maplet currently provides full dynamic execution tracing for Python. Static analysis and project navigation are supported for Python, Go, and C. Additional languages will be added soon! (I'm sorry i just deal with those more than others, so I had to add them first.)
+> Note: Maplet currently provides full dynamic execution tracing for Python and JavaScript/TypeScript. Static analysis and project navigation are supported for Python, Go, C, and JavaScript/TypeScript. Additional languages will be added soon! (I'm sorry i just deal with those more than others, so I had to add them first.)
 
 Maplet operates in a dual-pane workflow. The left pane acts as the "body", while the right pane is the "brain", tracing the flow the codebase takes during runtime.
 
@@ -47,7 +63,7 @@ maplet flow .
 # Maplet will inject the environment variables and execute the process
 maplet run "python app.py"
 ```
-*(you can substitute `python app.py` based on your framework; `flask run`, `uvicorn main:app`, `pytest`, etc.)*
+*(you can substitute `python app.py` based on your framework; `node app.js`, `npm start`, `flask run`, `uvicorn main:app`, `pytest`, etc.)*
 
 ### Other Quick Tools (WIP)
 > Maplet will show the whole codebase structure through [cytoscape.js](https://js.cytoscape.org/) at `localhost:6433`

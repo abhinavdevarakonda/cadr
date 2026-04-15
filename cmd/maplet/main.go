@@ -12,6 +12,7 @@ import (
 	"github.com/abhinavdevarakonda/maplet/internal/graph"
 	_ "github.com/abhinavdevarakonda/maplet/internal/lang/c"
 	_ "github.com/abhinavdevarakonda/maplet/internal/lang/golang"
+	_ "github.com/abhinavdevarakonda/maplet/internal/lang/javascript"
 	_ "github.com/abhinavdevarakonda/maplet/internal/lang/python"
 	"github.com/abhinavdevarakonda/maplet/internal/server"
 	"github.com/abhinavdevarakonda/maplet/internal/tracer"

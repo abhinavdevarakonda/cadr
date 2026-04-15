@@ -62,17 +62,35 @@ func runCmd(fullCmd string, localOnly bool, onEvent func(Event)) error {
 	}
 
 	if agent.EnvVar != "" {
-		pathFound := false
-		for i, env := range cmd.Env {
-			if strings.HasPrefix(env, agent.EnvVar+"=") {
-				newPath := hookDir + string(os.PathListSeparator) + strings.TrimPrefix(env, agent.EnvVar+"=")
-				cmd.Env[i] = agent.EnvVar + "=" + newPath
-				pathFound = true
-				break
+		if agent.EnvValue != "" {
+			// direct value mode (e.g., NODE_OPTIONS="--require /path/to/js_trace.js")
+			value := strings.ReplaceAll(agent.EnvValue, "{hookDir}", hookDir)
+			pathFound := false
+			for i, env := range cmd.Env {
+				if strings.HasPrefix(env, agent.EnvVar+"=") {
+					existing := strings.TrimPrefix(env, agent.EnvVar+"=")
+					cmd.Env[i] = agent.EnvVar + "=" + value + " " + existing
+					pathFound = true
+					break
+				}
 			}
-		}
-		if !pathFound {
-			cmd.Env = append(cmd.Env, agent.EnvVar+"="+hookDir)
+			if !pathFound {
+				cmd.Env = append(cmd.Env, agent.EnvVar+"="+value)
+			}
+		} else {
+			// PATH-style prepend mode (e.g., PYTHONPATH)
+			pathFound := false
+			for i, env := range cmd.Env {
+				if strings.HasPrefix(env, agent.EnvVar+"=") {
+					newPath := hookDir + string(os.PathListSeparator) + strings.TrimPrefix(env, agent.EnvVar+"=")
+					cmd.Env[i] = agent.EnvVar + "=" + newPath
+					pathFound = true
+					break
+				}
+			}
+			if !pathFound {
+				cmd.Env = append(cmd.Env, agent.EnvVar+"="+hookDir)
+			}
 		}
 	}
 
