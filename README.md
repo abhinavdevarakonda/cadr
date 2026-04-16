@@ -48,7 +48,7 @@ go install github.com/abhinavdevarakonda/maplet/cmd/maplet@latest
 ---
 
 ## Usage Overview
-> Note: Maplet currently provides full dynamic execution tracing for Python and JavaScript/TypeScript. Static analysis and project navigation are supported for Python, Go, C, and JavaScript/TypeScript. Additional languages will be added soon! (I'm sorry i just deal with those more than others, so I had to add them first.)
+> Note: Maplet currently provides full dynamic execution tracing for Python and JavaScript/TypeScript. Static analysis and project navigation are supported for Python, Go, C, and JavaScript/TypeScript. Additional languages will be added soon! (I just deal with those more than others, so I had to add them first.)
 
 Maplet operates in a dual-pane workflow. The left pane acts as the "body", while the right pane is the "brain", tracing the flow the codebase takes during runtime.
 
@@ -118,9 +118,8 @@ Add Maplet to your agent's MCP configuration (e.g., `claude_desktop_config.json`
 }
 ```
 
-### AI-Agent Power Tools
+### MCP Tools
 Maplet provides the AI with several high-level tools to understand code deeply:
 - **`find_symbol`**: Locates function definitions across the entire project.
 - **`get_callers / get_callees`**: Shows the immediate "Impact" and "Trace" of a function.
-- **`run_trace`**: Lets the AI execute your code and see the **live call sequence** returned as data.
-- **`set_project_root`**: Allows the AI to autonomously switch its focus to a different project or subdirectory as you move around.
+- **`run_trace`**: Lets your agent execute your code and see the **live call sequence** returned as data.
