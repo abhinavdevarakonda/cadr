@@ -13,11 +13,10 @@ import (
 )
 
 type Event struct {
-	Event     string  `json:"event"`
-	Name      string  `json:"name"`
-	File      string  `json:"file"`
-	Line      int     `json:"line"`
-	Timestamp float64 `json:"timestamp"`
+	Name string                 `json:"fn"`
+	File string                 `json:"file"`
+	Line int                    `json:"line"`
+	Args map[string]interface{} `json:"args"`
 }
 
 type Recording struct {

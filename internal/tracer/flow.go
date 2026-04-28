@@ -5,10 +5,9 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"time"
 )
 
-// Hit uses runtime reflection to capture the caller's identity and emits it as JSON-RPC to stderr.
+// hit uses runtime reflection to capture the caller's identity and emits it as JSON to stderr.
 func Hit() func() {
 	pc, file, line, ok := runtime.Caller(1)
 	if !ok {
@@ -21,11 +20,10 @@ func Hit() func() {
 	}
 
 	event := Event{
-		Event:     "call",
-		Name:      fn.Name(),
-		File:      file,
-		Line:      line,
-		Timestamp: float64(time.Now().UnixNano()) / 1e9,
+		Name: fn.Name(),
+		File: file,
+		Line: line,
+		Args: map[string]interface{}{},
 	}
 
 	data, _ := json.Marshal(event)

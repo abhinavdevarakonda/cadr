@@ -41,14 +41,32 @@ function trySend(event) {
     }
 }
 
+// serialize function arguments and truncate larger values
+function _safeArgs(args) {
+    const result = {};
+    for (let i = 0; i < args.length; i++) {
+        try {
+            const v = args[i];
+            if (v === null || v === undefined || typeof v === 'boolean' || typeof v === 'number') {
+                result[i] = v;
+            } else {
+                const s = String(v);
+                result[i] = s.length <= 120 ? s : s.slice(0, 120) + '...';
+            }
+        } catch (e) {
+            result[i] = '<unserializable>';
+        }
+    }
+    return result;
+}
+
 // Global trace function injected into every instrumented function body
-global.__maplet_trace = function (name, file, line) {
+global.__maplet_trace = function (name, file, line, args) {
     trySend({
-        event: 'call',
-        name: name,
+        fn: name,
         file: file,
         line: line,
-        timestamp: Date.now() / 1000
+        args: _safeArgs(args || []),
     });
 };
 
@@ -111,7 +129,7 @@ function instrumentSource(code, filename) {
 
     let result = code;
     for (const ins of insertions) {
-        const traceCall = `__maplet_trace(${JSON.stringify(ins.funcName)},${JSON.stringify(filename)},${ins.line});`;
+        const traceCall = `__maplet_trace(${JSON.stringify(ins.funcName)},${JSON.stringify(filename)},${ins.line},arguments);`;
         result = result.slice(0, ins.pos) + traceCall + result.slice(ins.pos);
     }
 

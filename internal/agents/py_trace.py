@@ -1,6 +1,5 @@
 import sys
 import json
-import time
 import socket
 import threading
 import queue
@@ -32,6 +31,16 @@ def _sender_thread():
         except Exception:
             time.sleep(1) # Retry every second
 
+def _safe_repr(value):
+    """Safely serialize a value, truncating large objects to avoid slowdowns."""
+    try:
+        if isinstance(value, (int, float, bool, type(None))):
+            return value
+        s = repr(value)
+        return s if len(s) <= 120 else s[:120] + "..."
+    except Exception:
+        return "<unserializable>"
+
 def trace_calls(frame, event, arg):
     """Callback for sys.settrace. Captures function calls and emits JSON metadata."""
     if event != 'call':
@@ -53,12 +62,15 @@ def trace_calls(frame, event, arg):
     if _project_root not in filename:
         return None
 
+    # Capture parameter names (args defined in the function signature)
+    arg_names = code.co_varnames[:code.co_argcount]
+    args = {name: _safe_repr(frame.f_locals.get(name)) for name in arg_names}
+
     event_data = {
-        "event": "call",
-        "name": func_name,
+        "fn": func_name,
         "file": filename,
         "line": frame.f_lineno,
-        "timestamp": time.time()
+        "args": args,
     }
     
     # Send to the background thread

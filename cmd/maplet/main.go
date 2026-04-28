@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/abhinavdevarakonda/maplet/internal/agents"
 	"github.com/abhinavdevarakonda/maplet/internal/analyzer"
@@ -32,6 +35,7 @@ func main() {
 		fmt.Println("	maplet nav <path>")
 		fmt.Println("	maplet flow <path>")
 		fmt.Println("	maplet run <command>")
+		fmt.Println("	maplet rec <command>")
 		return
 	}
 
@@ -168,6 +172,61 @@ func main() {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
 		}
+
+	case "rec":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: maplet rec <command>")
+			return
+		}
+		cmdStr := os.Args[2]
+
+		// Ensure .maplet directory exists
+		if err := os.MkdirAll(".maplet", 0755); err != nil {
+			fmt.Printf("Error creating .maplet dir: %v\n", err)
+			os.Exit(1)
+		}
+
+		outFile, err := os.Create(".maplet/last_run.jsonl")
+		if err != nil {
+			fmt.Printf("Error creating record file: %v\n", err)
+			os.Exit(1)
+		}
+		defer outFile.Close()
+		writer := bufio.NewWriter(outFile)
+		var mu sync.Mutex
+
+		// Start TCP listener so the agent can connect
+		ln, err := net.Listen("tcp", "localhost:9876")
+		if err != nil {
+			fmt.Printf("Error starting listener: %v\n", err)
+			os.Exit(1)
+		}
+		go func() {
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				go func(c net.Conn) {
+					defer c.Close()
+					scanner := bufio.NewScanner(c)
+					for scanner.Scan() {
+						mu.Lock()
+						_, _ = writer.WriteString(scanner.Text() + "\n")
+						_ = writer.Flush()
+						mu.Unlock()
+					}
+				}(conn)
+			}
+		}()
+
+		fmt.Fprintf(os.Stderr, "Recording trace to .maplet/last_run.jsonl...\n")
+		if err := tracer.Run(cmdStr, func(e tracer.Event) {}); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+		ln.Close()
+		fmt.Fprintf(os.Stderr, "Trace saved to .maplet/last_run.jsonl\n")
 
 	default:
 		fmt.Println("unknown command:", command)
