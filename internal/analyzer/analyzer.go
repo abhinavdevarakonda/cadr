@@ -12,6 +12,7 @@ import (
 )
 
 type Result struct {
+	Root  string
 	Graph *graph.Graph
 }
 
@@ -47,7 +48,9 @@ func Analyze(root string) Result {
 	}
 
 	// fmt.Println("total symbols:", len(symbols), "total facts:", len(facts))
-	return Build(scan, symbols, facts)
+	res := Build(scan, symbols, facts)
+	res.Root = root
+	return res
 }
 
 func Scan(root string) (*ScanResult, error) {

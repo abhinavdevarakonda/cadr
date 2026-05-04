@@ -197,5 +197,47 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		return mcp.NewToolResultText("Execution Trace Sequence:\n" + strings.Join(traceLog, "\n")), nil
 	})
 
+	s.AddTool(mcp.NewTool("get_last_trace",
+		mcp.WithDescription("Read the last recorded trace from .maplet/last_run.jsonl (created by 'maplet rec'). Returns function calls with parameters."),
+		mcp.WithString("fn", mcp.Description("Optional: filter by function name to only show calls to this function")),
+		mcp.WithNumber("limit", mcp.Description("Optional: max number of events to return (default: all)")),
+	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		tracePath := filepath.Join(result.Root, ".maplet", "last_run.jsonl")
+		f, err := os.Open(tracePath)
+		if err != nil {
+			return mcp.NewToolResultError("No recorded trace found. Run 'maplet rec <command>' first."), nil
+		}
+		defer f.Close()
+
+		fnFilter := request.GetString("fn", "")
+		limit := request.GetInt("limit", 0)
+
+		var lines []string
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := scanner.Text()
+
+			// Apply function name filter if provided
+			if fnFilter != "" && !strings.Contains(line, fmt.Sprintf(`"fn":"%s"`, fnFilter)) && !strings.Contains(line, fmt.Sprintf(`"fn": "%s"`, fnFilter)) {
+				continue
+			}
+
+			lines = append(lines, line)
+
+			if limit > 0 && len(lines) >= limit {
+				break
+			}
+		}
+
+		if len(lines) == 0 {
+			if fnFilter != "" {
+				return mcp.NewToolResultText(fmt.Sprintf("No calls to '%s' found in the last trace.", fnFilter)), nil
+			}
+			return mcp.NewToolResultText("Trace file is empty."), nil
+		}
+
+		return mcp.NewToolResultText(fmt.Sprintf("Last recorded trace (%d events):\n%s", len(lines), strings.Join(lines, "\n"))), nil
+	})
+
 	return s
 }
