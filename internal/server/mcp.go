@@ -8,15 +8,15 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/abhinavdevarakonda/maplet/internal/analyzer"
-	"github.com/abhinavdevarakonda/maplet/internal/graph"
-	"github.com/abhinavdevarakonda/maplet/internal/tracer"
+	"github.com/abhinavdevarakonda/cadastre/internal/analyzer"
+	"github.com/abhinavdevarakonda/cadastre/internal/graph"
+	"github.com/abhinavdevarakonda/cadastre/internal/tracer"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
 func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
-	s := mcpserver.NewMCPServer("maplet", "1.0.0")
+	s := mcpserver.NewMCPServer("cadr", "1.0.0")
 
 	// global tool to change the current working project
 	s.AddTool(mcp.NewTool("set_project_root",
@@ -42,7 +42,7 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		mcp.WithString("name", mcp.Description("Symbol name"), mcp.Required()),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if result.Graph == nil {
-			return mcp.NewToolResultText("Maplet is still analyzing the project in the background. Please try again in a few seconds."), nil
+			return mcp.NewToolResultText("Cadastre is still analyzing the project in the background. Please try again in a few seconds."), nil
 		}
 		name, _ := request.RequireString("name")
 		var matches []string
@@ -62,7 +62,7 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		mcp.WithString("id", mcp.Description("Node ID"), mcp.Required()),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if result.Graph == nil {
-			return mcp.NewToolResultText("Maplet is still analyzing the project in the background. Please try again in a few seconds."), nil
+			return mcp.NewToolResultText("Cadastre is still analyzing the project in the background. Please try again in a few seconds."), nil
 		}
 		id, _ := request.RequireString("id")
 		n, ok := result.Graph.Nodes[id]
@@ -77,7 +77,7 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		mcp.WithString("function_id", mcp.Required()),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if result.Graph == nil {
-			return mcp.NewToolResultText("Maplet is still analyzing the project in the background. Please try again in a few seconds."), nil
+			return mcp.NewToolResultText("Cadastre is still analyzing the project in the background. Please try again in a few seconds."), nil
 		}
 		id, _ := request.RequireString("function_id")
 		callers := analyzer.ImpactAnalysis(result.Graph, id)
@@ -93,7 +93,7 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		mcp.WithString("function_id", mcp.Required()),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if result.Graph == nil {
-			return mcp.NewToolResultText("Maplet is still analyzing the project in the background. Please try again in a few seconds."), nil
+			return mcp.NewToolResultText("Cadastre is still analyzing the project in the background. Please try again in a few seconds."), nil
 		}
 		id, _ := request.RequireString("function_id")
 		callees := analyzer.TraceAnalysis(result.Graph, id)
@@ -109,7 +109,7 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		mcp.WithString("function_id", mcp.Required()),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if result.Graph == nil {
-			return mcp.NewToolResultText("Maplet is still analyzing the project in the background. Please try again in a few seconds."), nil
+			return mcp.NewToolResultText("Cadastre is still analyzing the project in the background. Please try again in a few seconds."), nil
 		}
 		id, _ := request.RequireString("function_id")
 		affected := analyzer.TransitiveImpact(result.Graph, id)
@@ -121,7 +121,7 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		mcp.WithString("function_id", mcp.Required()),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if result.Graph == nil {
-			return mcp.NewToolResultText("Maplet is still analyzing the project in the background. Please try again in a few seconds."), nil
+			return mcp.NewToolResultText("Cadastre is still analyzing the project in the background. Please try again in a few seconds."), nil
 		}
 		id, _ := request.RequireString("function_id")
 		called := analyzer.TransitiveTrace(result.Graph, id)
@@ -134,7 +134,7 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		mcp.WithString("end_id", mcp.Required()),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if result.Graph == nil {
-			return mcp.NewToolResultText("Maplet is still analyzing the project in the background. Please try again in a few seconds."), nil
+			return mcp.NewToolResultText("Cadastre is still analyzing the project in the background. Please try again in a few seconds."), nil
 		}
 		start, _ := request.RequireString("start_id")
 		end, _ := request.RequireString("end_id")
@@ -150,7 +150,7 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		mcp.WithString("file_path", mcp.Required()),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if result.Graph == nil {
-			return mcp.NewToolResultText("Maplet is still analyzing the project in the background. Please try again in a few seconds."), nil
+			return mcp.NewToolResultText("Cadastre is still analyzing the project in the background. Please try again in a few seconds."), nil
 		}
 		path, _ := request.RequireString("file_path")
 		var res []string
@@ -167,7 +167,7 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		mcp.WithString("id", mcp.Required()),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if result.Graph == nil {
-			return mcp.NewToolResultText("Maplet is still analyzing the project in the background. Please try again in a few seconds."), nil
+			return mcp.NewToolResultText("Cadastre is still analyzing the project in the background. Please try again in a few seconds."), nil
 		}
 		id, _ := request.RequireString("id")
 		n, ok := result.Graph.Nodes[id]
@@ -225,14 +225,14 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 	})
 
 	s.AddTool(mcp.NewTool("get_last_trace",
-		mcp.WithDescription("Read the last recorded trace from .maplet/last_run.jsonl (created by 'maplet rec'). Returns function calls with parameters."),
+		mcp.WithDescription("Read the last recorded trace from .cadr/last_run.jsonl (created by 'cadr rec'). Returns function calls with parameters."),
 		mcp.WithString("fn", mcp.Description("Optional: filter by function name to only show calls to this function")),
 		mcp.WithNumber("limit", mcp.Description("Optional: max number of events to return (default: all)")),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		tracePath := filepath.Join(result.Root, ".maplet", "last_run.jsonl")
+		tracePath := filepath.Join(result.Root, ".cadr", "last_run.jsonl")
 		f, err := os.Open(tracePath)
 		if err != nil {
-			return mcp.NewToolResultError("No recorded trace found. Run 'maplet rec <command>' first."), nil
+			return mcp.NewToolResultError("No recorded trace found. Run 'cadr rec <command>' first."), nil
 		}
 		defer f.Close()
 

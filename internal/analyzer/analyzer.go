@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/abhinavdevarakonda/maplet/internal/graph"
-	"github.com/abhinavdevarakonda/maplet/internal/lang"
-	"github.com/abhinavdevarakonda/maplet/internal/types"
+	"github.com/abhinavdevarakonda/cadastre/internal/graph"
+	"github.com/abhinavdevarakonda/cadastre/internal/lang"
+	"github.com/abhinavdevarakonda/cadastre/internal/types"
 )
 
 type Result struct {

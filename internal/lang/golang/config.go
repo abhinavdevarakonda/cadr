@@ -6,7 +6,7 @@ import (
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/golang"
-	"github.com/abhinavdevarakonda/maplet/internal/types"
+	"github.com/abhinavdevarakonda/cadastre/internal/types"
 )
 
 type GoConfig struct{}

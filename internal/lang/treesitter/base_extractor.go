@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/abhinavdevarakonda/maplet/internal/types"
+	"github.com/abhinavdevarakonda/cadastre/internal/types"
 )
 
 type BaseExtractor struct {

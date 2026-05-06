@@ -1,9 +1,9 @@
 package c
 
 import (
-	"github.com/abhinavdevarakonda/maplet/internal/lang"
-	"github.com/abhinavdevarakonda/maplet/internal/lang/treesitter"
-	"github.com/abhinavdevarakonda/maplet/internal/types"
+	"github.com/abhinavdevarakonda/cadastre/internal/lang"
+	"github.com/abhinavdevarakonda/cadastre/internal/lang/treesitter"
+	"github.com/abhinavdevarakonda/cadastre/internal/types"
 )
 
 type CLang struct{}

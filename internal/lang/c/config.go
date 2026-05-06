@@ -7,7 +7,7 @@ import (
 
 	sitter "github.com/smacker/go-tree-sitter"
 	tree_sitter_c "github.com/smacker/go-tree-sitter/c"
-	"github.com/abhinavdevarakonda/maplet/internal/types"
+	"github.com/abhinavdevarakonda/cadastre/internal/types"
 )
 
 type CConfig struct{}

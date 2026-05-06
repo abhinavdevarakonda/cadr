@@ -91,7 +91,7 @@ func SetupHookDir(agent Agent) (string, error) {
 		return "", err
 	}
 
-	hookDir := filepath.Join(home, ".maplet", "hooks", agent.Name)
+	hookDir := filepath.Join(home, ".cadr", "hooks", agent.Name)
 	if err := os.MkdirAll(hookDir, 0755); err != nil {
 		return "", err
 	}

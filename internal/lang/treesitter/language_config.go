@@ -2,7 +2,7 @@ package treesitter
 
 import (
 	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/abhinavdevarakonda/maplet/internal/types"
+	"github.com/abhinavdevarakonda/cadastre/internal/types"
 )
 
 // LanguageConfig defines the interface that each language must implement
