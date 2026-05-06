@@ -46,6 +46,7 @@ func main() {
 	knownCommands := map[string]bool{
 		"analyze": true, "impact": true, "export": true,
 		"serve": true, "mcp": true, "run": true, "rec": true,
+		"version": true, "--version": true, "-v": true,
 	}
 	if !knownCommands[command] {
 		result := analyzer.Analyze(command)
@@ -137,7 +138,6 @@ func main() {
 			panic(err)
 		}
 
-
 	case "mcp":
 		// empty result so we can start the server immediately
 		result := &analyzer.Result{Root: path}
@@ -225,6 +225,9 @@ func main() {
 		}
 		ln.Close()
 		fmt.Fprintf(os.Stderr, "Trace saved to .cadr/last_run.jsonl\n")
+
+	case "version", "--version", "-v":
+		fmt.Println("cadr version 0.3.0")
 
 	default:
 		fmt.Println("unknown command:", command)

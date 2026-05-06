@@ -1,6 +1,21 @@
-# cadr
+<h1 align="center">cadr</h1>
 
-<video src="https://github.com/user-attachments/assets/7d523ad0-d2a6-403e-a879-e9f3cd1344e0" autoplay loop muted></video>
+<p align="center">
+  <b>The cadastre for your codebase.</b><br>
+  <i>100% local. Real-time observability. No cloud.</i>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Local-100%25-green?style=flat-square" alt="100% Local" />
+  <img src="https://img.shields.io/badge/Privacy-No%20Cloud-black?style=flat-square" alt="No Cloud" />
+  <img src="https://img.shields.io/badge/Analysis-Dynamic%20+%20Static-blue?style=flat-square" alt="Analysis" />
+</p>
+
+<hr />
+
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/7d523ad0-d2a6-403e-a879-e9f3cd1344e0" width="850" autoplay loop muted></video>
+</p>
 
 cadr is a terminal-native tool that integrates static analysis with dynamic execution tracing. It shows you a real-time map of your codebase's execution flow directly in the terminal. Explore complex application logic and legacy codebases without relying on manual logs, or "KT's" if you're using it at work :p
 
