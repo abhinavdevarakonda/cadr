@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/abhinavdevarakonda/maplet/internal/lang/universal"
-	"github.com/abhinavdevarakonda/maplet/internal/types"
+	"github.com/abhinavdevarakonda/cadastre/internal/lang/universal"
+	"github.com/abhinavdevarakonda/cadastre/internal/types"
 	sitter "github.com/smacker/go-tree-sitter"
 	tree_sitter_python "github.com/smacker/go-tree-sitter/python"
 )

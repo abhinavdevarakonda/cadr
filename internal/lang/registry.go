@@ -1,7 +1,7 @@
 package lang
 
 import (
-	"github.com/abhinavdevarakonda/maplet/internal/types"
+	"github.com/abhinavdevarakonda/cadastre/internal/types"
 )
 
 type LanguageExtractor interface {

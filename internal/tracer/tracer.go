@@ -9,7 +9,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/abhinavdevarakonda/maplet/internal/agents"
+	"github.com/abhinavdevarakonda/cadastre/internal/agents"
 )
 
 type Event struct {
@@ -52,7 +52,7 @@ func runCmd(fullCmd string, localOnly bool, onEvent func(Event)) error {
 	cmd.Env = os.Environ()
 
 	if localOnly {
-		cmd.Env = append(cmd.Env, "MAPLET_LOCAL_ONLY=1")
+		cmd.Env = append(cmd.Env, "CADR_LOCAL_ONLY=1")
 	}
 
 	hookDir, err := agents.SetupHookDir(agent)

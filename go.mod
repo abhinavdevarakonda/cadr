@@ -1,4 +1,4 @@
-module github.com/abhinavdevarakonda/maplet
+module github.com/abhinavdevarakonda/cadastre
 
 go 1.24.2
 

@@ -1,6 +1,6 @@
 import os
 
-# only trace if maplet asked us to
+# only trace if cadr asked us to
 if os.environ.get("MAPLET_TRACE") == "1":
     try:
         import py_trace

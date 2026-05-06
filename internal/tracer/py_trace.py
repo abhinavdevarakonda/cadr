@@ -73,7 +73,7 @@ def trace_calls(frame, event, arg):
 def start():
     """Initializes the background sender and globally attaches the Maplet trace hook."""
     # Start background sender unless we are explicitly doing a local synchronous trace
-    if os.environ.get("MAPLET_LOCAL_ONLY") != "1":
+    if os.environ.get("CADR_LOCAL_ONLY") != "1":
         t = threading.Thread(target=_sender_thread, daemon=True)
         t.start()
     else:
