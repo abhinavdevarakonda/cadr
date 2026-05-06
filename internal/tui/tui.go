@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/abhinavdevarakonda/cadastre/internal/analyzer"
-	"github.com/abhinavdevarakonda/cadastre/internal/graph"
-	"github.com/abhinavdevarakonda/cadastre/internal/tracer"
+	"github.com/abhinavdevarakonda/cadr/internal/analyzer"
+	"github.com/abhinavdevarakonda/cadr/internal/graph"
+	"github.com/abhinavdevarakonda/cadr/internal/tracer"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -713,7 +713,7 @@ func (m Model) View() string {
 	}
 
 	// 1. Title bar
-	title := faintStyle.Render("Cadastre Navigator \u2013 ") + textStyle.Render("project: cadr")
+	title := faintStyle.Render("cadr Navigator \u2013 ") + textStyle.Render("project: cadr")
 	topBar := lipgloss.NewStyle().
 		Width(m.width).
 		Border(lipgloss.NormalBorder(), false, false, true, false).
@@ -1066,7 +1066,7 @@ func openEditor(item *TreeItem) error {
 func Start(g *graph.Graph) error {
 	m := NewModel(g)
 
-	// Passive Listening: Nav listens but doesn't error if port is busy (another Cadastre might be open)
+	// Passive Listening: Nav listens but doesn't error if port is busy (another cadr might be open)
 	var prog *tea.Program
 	go func() {
 		tracer.Listen(func(e tracer.Event) {

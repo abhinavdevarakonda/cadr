@@ -1,4 +1,4 @@
-module github.com/abhinavdevarakonda/cadastre
+module github.com/abhinavdevarakonda/cadr
 
 go 1.24.2
 

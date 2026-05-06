@@ -18,7 +18,7 @@ def _sender_thread():
             _sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             _sock.connect(("localhost", 9876))
             _sock_connected.set()
-            print("Cadastre: Connected to monitor.", file=sys.stderr)
+            print("cadr: Connected to monitor.", file=sys.stderr)
             
             while True:
                 event = _event_queue.get()
@@ -27,7 +27,7 @@ def _sender_thread():
                     _sock.sendall(line)
                 except:
                     _sock_connected.clear()
-                    print("Cadastre: Connection lost. Retrying...", file=sys.stderr)
+                    print("cadr: Connection lost. Retrying...", file=sys.stderr)
                     break 
         except Exception:
             time.sleep(1) # Retry every second
@@ -71,7 +71,7 @@ def trace_calls(frame, event, arg):
     return trace_calls
 
 def start():
-    """Initializes the background sender and globally attaches the Cadastre trace hook."""
+    """Initializes the background sender and globally attaches the cadr trace hook."""
     # Start background sender unless we are explicitly doing a local synchronous trace
     if os.environ.get("CADR_LOCAL_ONLY") != "1":
         t = threading.Thread(target=_sender_thread, daemon=True)

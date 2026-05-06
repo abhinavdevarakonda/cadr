@@ -3,7 +3,7 @@ package analyzer
 import (
 	"sort"
 
-	"github.com/abhinavdevarakonda/cadastre/internal/graph"
+	"github.com/abhinavdevarakonda/cadr/internal/graph"
 )
 
 type ImpactResult struct {

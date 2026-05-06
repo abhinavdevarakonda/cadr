@@ -7,4 +7,4 @@ if os.environ.get("CADR_TRACE") == "1":
         py_trace.start()
     except Exception as e:
         import sys
-        print(f"Cadastre trace injection failed: {e}", file=sys.stderr)
+        print(f"cadr trace injection failed: {e}", file=sys.stderr)

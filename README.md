@@ -1,12 +1,12 @@
-# Maplet
+# cadr
 
 <video src="https://github.com/user-attachments/assets/7d523ad0-d2a6-403e-a879-e9f3cd1344e0" autoplay loop muted></video>
 
-Maplet is a terminal-native tool that integrates static analysis with dynamic execution tracing. It shows you a real-time map of your codebase's execution flow directly in the terminal. Explore complex application logic and legacy codebases without relying on manual logs, or "KT's" if you're using it at work :p
+cadr is a terminal-native tool that integrates static analysis with dynamic execution tracing. It shows you a real-time map of your codebase's execution flow directly in the terminal. Explore complex application logic and legacy codebases without relying on manual logs, or "KT's" if you're using it at work :p
 
-Maplet has three primary systems:
+cadr has three primary systems:
 1. **Static Analyzer (TreeSitter)**: Parses the project directories to build a weighted structural dependencies graph.
-2. **Dynamic Tracer**: Uses `PYTHONPATH` or `NODE_OPTIONS` injection to hook into target applications, transmitting TCP payloads of your service line-by-line back to the Maplet daemon. Native support for multi-threading, multi-processing, and web subprocesses (Flask, Uvicorn, Express, NestJS).
+2. **Dynamic Tracer**: Uses `PYTHONPATH` or `NODE_OPTIONS` injection to hook into target applications, transmitting TCP payloads of your service line-by-line back to the cadr daemon. Native support for multi-threading, multi-processing, and web subprocesses (Flask, Uvicorn, Express, NestJS).
 3. **Interactive TUI**: Sticks and follows to the live execution feed, providing a TUI for navigating execution paths chronologically or structurally in a way vim users can appreciate.
 
 ---
@@ -16,20 +16,20 @@ Maplet has three primary systems:
 ### linux/macOS
 
 #### Download Binary
-Download latest binary from [Github Releases.](https://github.com/abhinavdevarakonda/maplet/releases) 
+Download latest binary from [Github Releases.](https://github.com/abhinavdevarakonda/cadr/releases) 
 
 #### go install
 ```bash
-go install github.com/abhinavdevarakonda/maplet/cmd/maplet@latest
+go install github.com/abhinavdevarakonda/cadr/cmd/cadr@latest
 ```
 
 #### Build from Source
 > Requires a C compiler due to CGO (treesitter)
 ```bash
-git clone https://github.com/abhinavdevarakonda/maplet
-cd maplet
-go build -o maplet ./cmd/maplet
-sudo mv maplet /usr/local/bin/ # Add to PATH
+git clone https://github.com/abhinavdevarakonda/cadr
+cd cadr
+go build -o cadr ./cmd/cadr
+sudo mv cadr /usr/local/bin/ # Add to PATH
 ```
 
 ### Windows
@@ -41,51 +41,51 @@ Follow the Linux instructions inside your WSL terminal.
 1. **Prerequisite:** Install a C compiler (e.g., `scoop install gcc` or `choco install mingw`).
 2. **Install:**
 ```powershell
-go install github.com/abhinavdevarakonda/maplet/cmd/maplet@latest
+go install github.com/abhinavdevarakonda/cadr/cmd/cadr@latest
 ```
 *Note: the TUI would look cleaner and more consistent if using Windows Terminal.*
 
 ---
 
 ## Usage Overview
-> Note: Maplet currently provides full dynamic execution tracing for Python and JavaScript/TypeScript. Static analysis and project navigation are supported for Python, Go, C, and JavaScript/TypeScript. Additional languages will be added soon! (I just deal with those more than others, so I had to add them first.)
+> Note: cadr currently provides full dynamic execution tracing for Python and JavaScript/TypeScript. Static analysis and project navigation are supported for Python, Go, C, and JavaScript/TypeScript. Additional languages will be added soon! (I just deal with those more than others, so I had to add them first.)
 
-Maplet operates in a dual-pane workflow. The left pane acts as the "body", while the right pane is the "brain", tracing the flow the codebase takes during runtime.
+cadr operates in a dual-pane workflow. The left pane acts as the "body", while the right pane is the "brain", tracing the flow the codebase takes during runtime.
 
-**1. Start the Maplet Daemon**:
+**1. Start the cadr Daemon**:
 ```bash
 # Analyze the current directory and start listening for trace payloads
-maplet flow .
+cadr flow .
 ```
 
 **2. Execute Your Application**:
 ```bash
-# Maplet will inject the environment variables and execute the process
-maplet run "python app.py"
+# cadr will inject the environment variables and execute the process
+cadr run "python app.py"
 ```
 *(you can substitute `python app.py` based on your framework; `node app.js`, `npm start`, `flask run`, `uvicorn main:app`, `pytest`, etc.)*
 
 ### Other Quick Tools (WIP)
-> Maplet will show the whole codebase structure through [cytoscape.js](https://js.cytoscape.org/) at `localhost:6433`
+> cadr will show the whole codebase structure through [cytoscape.js](https://js.cytoscape.org/) at `localhost:6433`
 ```bash
-maplet serve .
+cadr serve .
 ```
 
 ---
 
 ## Technical Features
 
-### Real-time Trace Visualization (`maplet flow`)
-As the process executes, Maplet maps the incoming trace payloads onto the pre-made static graph:
+### Real-time Trace Visualization (`cadr flow`)
+As the process executes, cadr maps the incoming trace payloads onto the pre-made static graph:
 - **Heatmap Visualization**: Nodes in the structure tree visually scale based on execution frequency (function hit counts).
 - **Chronological Playhead**: The right-hand pane records a linear sequence of execution events.
 - **Dynamic Unrolling**: The structural tree (left pane) will automatically jump through directories to focus on active function/section in the real time trace execution.
-- **Fallback Navigation**: if your app executes dynamically generated code like a Jinja2 template that Maplet's static graph can't find, it will still capture the exact file and line number so you can instantly open it in your editor by just hitting enter on the function.
+- **Fallback Navigation**: if your app executes dynamically generated code like a Jinja2 template that cadr's static graph can't find, it will still capture the exact file and line number so you can instantly open it in your editor by just hitting enter on the function.
 
 ### Advanced TUI Controls
-Maplet uses standard Vim keybindings (`j/k/h/l`, `gg/G`, `/` for fuzzy search, `ctrl+j/k` for jumps).
+cadr uses standard Vim keybindings (`j/k/h/l`, `gg/G`, `/` for fuzzy search, `ctrl+j/k` for jumps).
 
-These are the Maplet-specific bindings:
+These are the cadr-specific bindings:
 
 | Key | Action |
 | :--- | :--- |
@@ -100,18 +100,18 @@ These are the Maplet-specific bindings:
 
 ---
 
-## Maplet MCP Server
+## cadr MCP Server
 
-Maplet exposes its static graph and dynamic analysis tools as an **MCP (Model Context Protocol)** server. This allows AI assistants (like Claude, Cursor, or Antigravity) to "see" your code structure and follow execution flows without manual grepping.
+cadr exposes its static graph and dynamic analysis tools as an **MCP (Model Context Protocol)** server. This allows AI assistants (like Claude, Cursor, or Antigravity) to "see" your code structure and follow execution flows without manual grepping.
 
 ### Setup
-Add Maplet to your agent's MCP configuration (e.g., `claude_desktop_config.json`). 
+Add cadr to your agent's MCP configuration (e.g., `claude_desktop_config.json`). 
 
 ```json
 {
   "mcpServers": {
-    "maplet": {
-      "command": "maplet",
+    "cadr": {
+      "command": "cadr",
       "args": ["mcp"]
     }
   }
@@ -119,7 +119,7 @@ Add Maplet to your agent's MCP configuration (e.g., `claude_desktop_config.json`
 ```
 
 ### MCP Tools
-Maplet provides the AI with several high-level tools to understand code deeply:
+cadr provides the AI with several high-level tools to understand code deeply:
 - **`find_symbol`**: Locates function definitions across the entire project.
 - **`get_callers / get_callees`**: Shows the immediate "Impact" and "Trace" of a function.
 - **`run_trace`**: Lets your agent execute your code and see the **live call sequence** returned as data.

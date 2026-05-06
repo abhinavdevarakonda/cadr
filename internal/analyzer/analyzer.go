@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/abhinavdevarakonda/cadastre/internal/graph"
-	"github.com/abhinavdevarakonda/cadastre/internal/lang"
-	"github.com/abhinavdevarakonda/cadastre/internal/types"
+	"github.com/abhinavdevarakonda/cadr/internal/graph"
+	"github.com/abhinavdevarakonda/cadr/internal/lang"
+	"github.com/abhinavdevarakonda/cadr/internal/types"
 )
 
 type Result struct {

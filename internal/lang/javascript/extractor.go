@@ -1,9 +1,9 @@
 package javascript
 
 import (
-	"github.com/abhinavdevarakonda/cadastre/internal/lang"
-	"github.com/abhinavdevarakonda/cadastre/internal/lang/treesitter"
-	"github.com/abhinavdevarakonda/cadastre/internal/types"
+	"github.com/abhinavdevarakonda/cadr/internal/lang"
+	"github.com/abhinavdevarakonda/cadr/internal/lang/treesitter"
+	"github.com/abhinavdevarakonda/cadr/internal/types"
 )
 
 type JSLang struct{}

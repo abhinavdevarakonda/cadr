@@ -13,7 +13,7 @@ function connect() {
     sock = new net.Socket();
     sock.connect(PORT, 'localhost', () => {
         connected = true;
-        process.stderr.write('Cadastre: Connected to monitor.\n');
+        process.stderr.write('cadr: Connected to monitor.\n');
         while (eventQueue.length > 0) {
             trySend(eventQueue.shift());
         }
@@ -144,7 +144,7 @@ Module.prototype._compile = function (content, filename) {
             content = instrumentSource(content, filename);
         } catch (e) {
             // If instrumentation fails, run uninstrumented
-            process.stderr.write(`Cadastre: instrumentation failed for ${filename}: ${e.message}\n`);
+            process.stderr.write(`cadr: instrumentation failed for ${filename}: ${e.message}\n`);
         }
     }
     return originalCompile.call(this, content, filename);

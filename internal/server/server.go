@@ -7,7 +7,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/abhinavdevarakonda/cadastre/internal/graph"
+	"github.com/abhinavdevarakonda/cadr/internal/graph"
 )
 
 //go:embed frontend/*

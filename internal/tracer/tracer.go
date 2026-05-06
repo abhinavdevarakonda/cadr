@@ -9,7 +9,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/abhinavdevarakonda/cadastre/internal/agents"
+	"github.com/abhinavdevarakonda/cadr/internal/agents"
 )
 
 type Event struct {

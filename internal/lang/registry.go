@@ -1,7 +1,7 @@
 package lang
 
 import (
-	"github.com/abhinavdevarakonda/cadastre/internal/types"
+	"github.com/abhinavdevarakonda/cadr/internal/types"
 )
 
 type LanguageExtractor interface {

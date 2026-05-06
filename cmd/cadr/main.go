@@ -10,16 +10,16 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/abhinavdevarakonda/cadastre/internal/agents"
-	"github.com/abhinavdevarakonda/cadastre/internal/analyzer"
-	"github.com/abhinavdevarakonda/cadastre/internal/graph"
-	_ "github.com/abhinavdevarakonda/cadastre/internal/lang/c"
-	_ "github.com/abhinavdevarakonda/cadastre/internal/lang/golang"
-	_ "github.com/abhinavdevarakonda/cadastre/internal/lang/javascript"
-	_ "github.com/abhinavdevarakonda/cadastre/internal/lang/python"
-	"github.com/abhinavdevarakonda/cadastre/internal/server"
-	"github.com/abhinavdevarakonda/cadastre/internal/tracer"
-	"github.com/abhinavdevarakonda/cadastre/internal/tui"
+	"github.com/abhinavdevarakonda/cadr/internal/agents"
+	"github.com/abhinavdevarakonda/cadr/internal/analyzer"
+	"github.com/abhinavdevarakonda/cadr/internal/graph"
+	_ "github.com/abhinavdevarakonda/cadr/internal/lang/c"
+	_ "github.com/abhinavdevarakonda/cadr/internal/lang/golang"
+	_ "github.com/abhinavdevarakonda/cadr/internal/lang/javascript"
+	_ "github.com/abhinavdevarakonda/cadr/internal/lang/python"
+	"github.com/abhinavdevarakonda/cadr/internal/server"
+	"github.com/abhinavdevarakonda/cadr/internal/tracer"
+	"github.com/abhinavdevarakonda/cadr/internal/tui"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
@@ -75,7 +75,7 @@ func main() {
 			}
 		}
 
-		fmt.Println("Cadastre Analysis Summary")
+		fmt.Println("cadr Analysis Summary")
 		fmt.Println("------------------------")
 		fmt.Printf("Functions: %d\n", functionCount)
 		fmt.Printf("Call edges: %d\n", callEdgeCount)
