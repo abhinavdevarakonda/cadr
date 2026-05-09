@@ -1,8 +1,5 @@
-<h1 align="center">cadr</h1>
-
 <p align="center">
-  <b>The cadastre for your codebase.</b><br>
-  <i>100% local. Real-time observability. No cloud.</i>
+  <img src="./assets/cadr-logo.png" width="200" alt="cadr" />
 </p>
 
 <p align="center">
@@ -15,7 +12,7 @@
 
 <p align="center">
   <!-- <video src="https://github.com/user-attachments/assets/7d523ad0-d2a6-403e-a879-e9f3cd1344e0" width="850" autoplay loop muted></video> -->
-  <img src="./demo-vhs/cadr-demo.gif" width="850" alt="cadr demo" />
+  <img src="./assets/cadr-demo.gif" width="850" alt="cadr demo" />
 </p>
 
 cadr is a terminal-native tool that integrates static analysis with dynamic execution tracing. It shows you a real-time map of your codebase's execution flow directly in the terminal. Explore complex application logic and legacy codebases without relying on manual logs, or "KT's" if you're using it at work :p

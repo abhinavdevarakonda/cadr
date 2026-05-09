@@ -10,3 +10,24 @@ understanding/
 .DS_Store
 # Added by goreleaser init:
 dist/
+
+# vhs Demos
+demo-vhs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Go
+coverage.out
+*.test
+
+# Node
+node_modules/
+npm-debug.log*
+.env

@@ -25,16 +25,16 @@ var (
 	faintStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	paneStyle     = lipgloss.NewStyle().Padding(1, 2)
 
-	// palette: jellybeans
+	/* palette: jellybeans
 	dirStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("103"))            // blue
 	funcStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("107"))            // green
 	glowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("222")).Bold(true) // yellow
+	*/
 
-	/* adaptive (follows your terminal theme exactly)
+	// adaptive (follows your terminal theme exactly)
 	dirStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))            // blue
 	funcStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))            // green
 	glowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true) // yellow
-	*/
 
 	// heatmap styles
 	heatLow     = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))  // Soft Green
