@@ -96,7 +96,7 @@ cadr serve .
 
 ### Real-time Trace Visualization (`cadr`)
 As the process executes, cadr maps the incoming trace payloads onto the pre-made static graph:
-- **Heatmap**: Nodes in the structure tree visually scale based on execution frequency (function hit counts).
+- **Heatmap Visualization**: Nodes in the structure tree visually scale based on execution frequency (function hit counts).
 - **Chronological Playhead**: The right-hand pane records a linear sequence of execution events.
 - **Dynamic Unrolling**: The structural tree (left pane) will automatically jump through directories to focus on active function/section in the real time trace execution.
 - **Fallback Navigation**: if your app executes dynamically generated code like a Jinja2 template that cadr's static graph can't find, it will still capture the exact file and line number so you can instantly open it in your editor by just hitting enter on the function.
@@ -110,11 +110,11 @@ These are the cadr-specific bindings:
 | :--- | :--- |
 | `i` | Toggle focus between the Left (Structure) and Right (Trace/Impact) panes. |
 | `c` | **State Toggle**: Collapse the entire tree to the root. Press again to restore your previous exact folder state. |
-| `enter` | Open the selected directory/file/function in your `$EDITOR` precisely at that line number. |
+| `enter` | Open the selected function/file in your `$EDITOR` precisely at that line number. |
 | `f` | Toggle **Follow Live**: Stops the left pane from auto-scrolling through the real-time function calls so you can inspect code while the app runs. |
 | `Space` | Toggle **Live/Pause**: Pause the UI to inspect a specific moment in the trace without losing data. Press again to unpause and go back to current execution calls. |
 | (shift+) `H` / `L` | scrub backwards or forwards through the chronological trace history. |
-| `t` / 'Tab' | Cycle right pane between **Flow** (sequence), **Impact** (callers), and **Trace** (callees). |
+| `t` | Cycle right pane between **Flow** (sequence), **Impact** (callers), and **Trace** (callees). |
 
 
 ---
@@ -125,7 +125,6 @@ cadr exposes its static graph and dynamic analysis tools as an **MCP (Model Cont
 
 ### Setup
 Add cadr to your agent's MCP configuration (e.g., `claude_desktop_config.json`). 
-> Different MCP clients use different configuration formats for registering servers, so refer to your client's documentation if needed.
 
 ```json
 {
