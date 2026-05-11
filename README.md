@@ -20,7 +20,7 @@
   <img src="./assets/cadr-demo.gif" width="850" alt="cadr demo" />
 </p>
 
-cadr is a terminal-native tool that integrates static analysis with dynamic execution tracing. It shows you a real-time map of your codebase's execution flow directly in the terminal. Explore complex application logic and legacy codebases without relying on manual logs, or "KT's" if you're using it at work :p
+cadr shows you a real-time map of your codebase's execution flow directly in the terminal. Explore complex application logic and legacy codebases without relying on manual logs, or "KT's" if you're using it at work :p
 
 cadr has three primary systems:
 1. **Static Analyzer (TreeSitter)**: Parses the project directories to build a weighted structural dependencies graph.
@@ -68,7 +68,7 @@ go install github.com/abhinavdevarakonda/cadr/cmd/cadr@latest
 ## Getting Started
 > Note: cadr currently provides full dynamic execution tracing for Python and JavaScript/TypeScript. Static analysis and project navigation are supported for Python, Go, C, and JavaScript/TypeScript. Additional languages will be added soon! (I just deal with those more than others, so I had to add them first.)
 
-cadr operates in a dual-pane workflow. The left pane acts as the "body", while the right pane is the "brain", tracing the flow the codebase takes during runtime.
+cadr operates in a dual-pane workflow. The left pane shows you the structure, while the right pane shows what's running and its relationships, tracing the flow the codebase takes during runtime.
 
 **1. Start the cadr Daemon**:
 ```bash
@@ -121,12 +121,11 @@ These are the cadr-specific bindings:
 
 ## cadr MCP Server
 
-cadr exposes its static graph and dynamic analysis tools as an **MCP (Model Context Protocol)** server. This allows AI assistants (like Claude, Cursor, or Antigravity) to "see" your code structure and follow execution flows without manual grepping.
+cadr exposes its static graph and dynamic analysis tools as an **MCP** server. This allows AI assistants (like Claude, Cursor, or Antigravity) to see your code structure and follow execution flows without manual grepping.
 
 ### Setup
 Add cadr to your agent's MCP configuration (e.g., `claude_desktop_config.json`). 
-> Different MCP clients use different configuration formats for registering servers, so refer to your client's documentation if needed.
-
+> Different MCP clients use different configuration formats for registering servers, so refer to your client's documentation if needed. This one below works for Antigravity.
 ```json
 {
   "mcpServers": {
@@ -139,7 +138,8 @@ Add cadr to your agent's MCP configuration (e.g., `claude_desktop_config.json`).
 ```
 
 ### MCP Tools
-cadr provides the AI with several high-level tools to understand code deeply:
-- **`find_symbol`**: Locates function definitions across the entire project.
-- **`get_callers / get_callees`**: Shows the immediate "Impact" and "Trace" of a function.
-- **`run_trace`**: Lets your agent execute your code and see the **live call sequence** returned as data.
+cadr provides the AI with 12 tools to understand code deeply, these are just a few of them:
+- **`call_path`**: Find a call path between two functions
+- **`impact_analysis`**: Transitively find all functions affected if this function changes
+- **`get_last_trace`**: Read the last recorded trace from `.cadr/last_run.jsonl` (created by `cadr rec`). Returns function calls with parameters.
+- **`run_trace`**: Run an arbitrary command and trace its function calls dynamically in the background
