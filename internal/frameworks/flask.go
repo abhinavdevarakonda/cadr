@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/abhinavdevarakonda/cadr/queries"
 	sitter "github.com/smacker/go-tree-sitter"
 	tree_sitter_python "github.com/smacker/go-tree-sitter/python"
 )
@@ -16,9 +17,14 @@ var flaskParamRegex = regexp.MustCompile(`<(?:([a-zA-Z_]\w*):)?([a-zA-Z_]\w*)>`)
 func DetectFlaskEndpoints(files []string) ([]Endpoint, error) {
 	var endpoints []Endpoint
 
-	queryBytes, err := os.ReadFile("queries/flask.scm")
+	var queryBytes []byte
+	var err error
+	queryBytes, err = os.ReadFile("queries/flask.scm")
 	if err != nil {
-		return nil, fmt.Errorf("failed to read flask query: %w", err)
+		queryBytes, err = queries.Files.ReadFile("flask.scm")
+		if err != nil {
+			return nil, fmt.Errorf("failed to read flask query: %w", err)
+		}
 	}
 
 	language := tree_sitter_python.GetLanguage()

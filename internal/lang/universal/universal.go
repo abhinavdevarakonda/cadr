@@ -3,6 +3,8 @@ package universal
 import (
 	"os"
 	"path/filepath"
+
+	"github.com/abhinavdevarakonda/cadr/queries"
 )
 
 var queriesDir = "queries"
@@ -22,8 +24,14 @@ func LoadFactQuery(lang string) (string, error) {
 func loadQuery(lang, queryType string) (string, error) {
 	path := filepath.Join(queriesDir, lang+".scm")
 	data, err := os.ReadFile(path)
-	if err != nil {
+	if err == nil {
+		return string(data), nil
+	}
+
+	// fallback to embedded queries
+	embData, embErr := queries.Files.ReadFile(lang + ".scm")
+	if embErr != nil {
 		return "", err
 	}
-	return string(data), nil
+	return string(embData), nil
 }
