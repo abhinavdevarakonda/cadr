@@ -19,4 +19,3 @@ func Register(l LanguageExtractor) {
 func All() []LanguageExtractor {
 	return languages
 }
-

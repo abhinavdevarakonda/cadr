@@ -46,6 +46,7 @@ func main() {
 	knownCommands := map[string]bool{
 		"analyze": true, "impact": true, "export": true,
 		"serve": true, "mcp": true, "run": true, "rec": true,
+		"api":     true,
 		"version": true, "--version": true, "-v": true,
 	}
 	if !knownCommands[command] {
@@ -57,6 +58,9 @@ func main() {
 	}
 
 	switch command {
+	case "api":
+		runAPICmd(path)
+
 	case "analyze":
 		result := analyzer.Analyze(path)
 		g := result.Graph

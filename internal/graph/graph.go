@@ -9,10 +9,10 @@ const (
 )
 
 type Node struct {
-	ID   string   `json:"id"`
-	Type NodeType `json:"type"`
-	Name string   `json:"name"`
-	Path string   `json:"path"`
+	ID      string   `json:"id"`
+	Type    NodeType `json:"type"`
+	Name    string   `json:"name"`
+	Path    string   `json:"path"`
 	Line    int      `json:"line,omitempty"`
 	EndLine int      `json:"end_line,omitempty"`
 }

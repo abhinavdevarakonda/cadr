@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/abhinavdevarakonda/cadr/internal/types"
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/golang"
-	"github.com/abhinavdevarakonda/cadr/internal/types"
 )
 
 type GoConfig struct{}

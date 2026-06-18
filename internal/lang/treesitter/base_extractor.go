@@ -4,19 +4,19 @@ import (
 	"context"
 	"fmt"
 
-	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/abhinavdevarakonda/cadr/internal/types"
+	sitter "github.com/smacker/go-tree-sitter"
 )
 
 type BaseExtractor struct {
-	config LanguageConfig
+	config   LanguageConfig
 	language *sitter.Language
 }
 
 // creates a new extractor with the given language config
 func NewBaseExtractor(config LanguageConfig) *BaseExtractor {
 	return &BaseExtractor{
-		config: config,
+		config:   config,
 		language: config.Grammar(),
 	}
 }
@@ -25,7 +25,7 @@ func (e *BaseExtractor) ExtractSymbols(files []string) ([]types.Symbol, error) {
 	var allSymbols []types.Symbol
 
 	queryStr := e.config.SymbolQuery()
-	
+
 	query, err := sitter.NewQuery([]byte(queryStr), e.language)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compile symbol query: %w", err)
@@ -111,7 +111,6 @@ func (e *BaseExtractor) extractSymbolsFromFile(query *sitter.Query, path string)
 	return symbols, nil
 }
 
-
 func (e *BaseExtractor) extractFactsFromFile(query *sitter.Query, path string) ([]types.Fact, error) {
 	parser := sitter.NewParser()
 	parser.SetLanguage(e.language)
@@ -155,4 +154,3 @@ func (e *BaseExtractor) extractFactsFromFile(query *sitter.Query, path string) (
 
 	return facts, nil
 }
-

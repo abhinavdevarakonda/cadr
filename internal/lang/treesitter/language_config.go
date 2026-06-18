@@ -1,8 +1,8 @@
 package treesitter
 
 import (
-	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/abhinavdevarakonda/cadr/internal/types"
+	sitter "github.com/smacker/go-tree-sitter"
 )
 
 // LanguageConfig defines the interface that each language must implement

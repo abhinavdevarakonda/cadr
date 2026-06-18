@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/abhinavdevarakonda/cadr/internal/types"
 	sitter "github.com/smacker/go-tree-sitter"
 	tree_sitter_c "github.com/smacker/go-tree-sitter/c"
-	"github.com/abhinavdevarakonda/cadr/internal/types"
 )
 
 type CConfig struct{}

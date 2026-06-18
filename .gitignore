@@ -31,3 +31,6 @@ coverage.out
 node_modules/
 npm-debug.log*
 .env
+
+# cadr runtime cache
+.cadr/

@@ -19,9 +19,8 @@ type Symbol struct {
 type Fact struct {
 	Path            string
 	Line            int
-	StartLine		int
-	EndLine			int
+	StartLine       int
+	EndLine         int
 	CalleeName      string
 	CalleeQualifier string
 }
-
