@@ -54,6 +54,11 @@ func detectFileEndpoints(query *sitter.Query, path string) ([]Endpoint, error) {
 		return nil, err
 	}
 
+	sourceStr := string(source)
+	if !strings.Contains(sourceStr, "flask") && !strings.Contains(sourceStr, "Flask") {
+		return nil, nil
+	}
+
 	parser := sitter.NewParser()
 	parser.SetLanguage(tree_sitter_python.GetLanguage())
 
