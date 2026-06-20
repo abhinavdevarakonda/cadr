@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"github.com/atotto/clipboard"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -56,6 +57,11 @@ var (
 			Bold(true).
 			Border(lipgloss.NormalBorder(), false, false, true, false).
 			BorderForeground(lipgloss.Color("240"))
+
+	searchHighlightStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("11")).
+			Foreground(lipgloss.Color("0")).
+			Bold(true)
 )
 
 func joinPath(prefix, path string) string {
@@ -143,6 +149,9 @@ type APIModel struct {
 	rightTab             RightPaneTab
 	focusRight           bool
 	selectedCallGraphIdx int
+	responseScrollY      int
+	responseSearchActive bool
+	responseSearchVal    string
 	itemToOpen           *LocationToOpen
 
 	// form & interactive input states
@@ -226,6 +235,9 @@ func (m *APIModel) initForm() {
 	m.responseBody = ""
 	m.statusCode = 0
 	m.loading = false
+	m.responseScrollY = 0
+	m.responseSearchActive = false
+	m.responseSearchVal = ""
 	m.updateFocus()
 }
 
@@ -441,6 +453,82 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		if m.focusRight && m.rightTab == TabResponse {
+			if m.responseSearchActive {
+				switch key {
+				case "enter", "esc":
+					m.responseSearchActive = false
+					return m, nil
+				case "backspace":
+					if len(m.responseSearchVal) > 0 {
+						m.responseSearchVal = m.responseSearchVal[:len(m.responseSearchVal)-1]
+					}
+					return m, nil
+				default:
+					if len(key) == 1 {
+						m.responseSearchVal += key
+					}
+					return m, nil
+				}
+			}
+
+			switch key {
+			case "q":
+				return m, tea.Quit
+			case "/":
+				m.responseSearchActive = true
+				m.responseSearchVal = ""
+				return m, nil
+			case "y":
+				_ = clipboard.WriteAll(m.responseBody)
+				return m, nil
+			case "j", "down":
+				halfWidth := m.width / 2
+				rightWidth := m.width - halfWidth
+				width := rightWidth - 4
+
+				var targetHost string
+				if len(m.filtered) > 0 && m.selectedIdx < len(m.filtered) {
+					targetHost = m.resolveTargetURL(m.filtered[m.selectedIdx])
+				} else {
+					targetHost = m.apiConfig.DefaultURL
+				}
+				title := faintStyle.Render("cadr api") + faintStyle.Render(" | ") + textStyle.Render("host: "+targetHost)
+				topBarHeight := lipgloss.Height(lipgloss.NewStyle().Width(m.width).Border(lipgloss.NormalBorder(), false, false, true, false).BorderForeground(lipgloss.Color("240")).Render(title))
+
+				helpBar := faintStyle.Render(" j/k: scroll response · h/left: back to left pane · t/tab: toggle tab · q: quit")
+				statusBarHeight := lipgloss.Height(lipgloss.NewStyle().Width(m.width).Border(lipgloss.NormalBorder(), true, false, false, false).BorderForeground(lipgloss.Color("240")).Render(helpBar))
+
+				mainHeight := m.height - topBarHeight - statusBarHeight
+				if mainHeight < 0 {
+					mainHeight = 0
+				}
+				contentHeight := mainHeight - 2
+				if contentHeight < 0 {
+					contentHeight = 0
+				}
+
+				maxScroll := m.responseLinesCount(width) - (contentHeight - 2)
+				if m.responseScrollY < maxScroll {
+					m.responseScrollY++
+				}
+				return m, nil
+			case "k", "up":
+				if m.responseScrollY > 0 {
+					m.responseScrollY--
+				}
+				return m, nil
+			case "h", "left":
+				m.focusRight = false
+				return m, nil
+			case "t", "tab":
+				m.rightTab = TabCallGraph
+				m.focusRight = false
+				return m, nil
+			}
+			return m, nil
+		}
+
 		if m.screen == ListScreen {
 			if m.searchActive {
 				switch key {
@@ -478,6 +566,9 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.focusRight = true
 						m.selectedCallGraphIdx = 0
 					}
+				} else if m.rightTab == TabResponse {
+					m.focusRight = true
+					m.responseScrollY = 0
 				}
 			case "t", "tab":
 				if m.rightTab == TabResponse {
@@ -528,6 +619,7 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 					m.loading = true
 					m.rightTab = TabResponse
+					m.responseScrollY = 0
 
 					saved.HitCount++
 					saved.LastCalled = time.Now().Format(time.RFC3339)
@@ -587,6 +679,7 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					saveCache(cache)
 
 					m.rightTab = TabResponse
+					m.responseScrollY = 0
 
 					cmd := sendRequest(ep.Method, urlStr, bodyVal, m.headerInput.Value())
 					return m, cmd
@@ -603,6 +696,9 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.focusRight = true
 							m.selectedCallGraphIdx = 0
 						}
+					} else if m.rightTab == TabResponse {
+						m.focusRight = true
+						m.responseScrollY = 0
 					}
 				case "t", "tab":
 					if m.rightTab == TabResponse {
@@ -646,6 +742,7 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					saveCache(cache)
 
 					m.rightTab = TabResponse
+					m.responseScrollY = 0
 
 					cmd := sendRequest(ep.Method, urlStr, bodyVal, m.headerInput.Value())
 					return m, cmd
@@ -753,10 +850,17 @@ func (m APIModel) View() string {
 		BorderForeground(lipgloss.Color("240")).
 		Render(title)
 
-	// 2. bottom status bar
 	var helpBar string
 	if m.focusRight {
-		helpBar = faintStyle.Render(" j/k: scroll graph · enter: open file in Neovim · h/left: back to left pane · t/tab: toggle tab · q: quit")
+		if m.rightTab == TabResponse {
+			if m.responseSearchActive {
+				helpBar = faintStyle.Render(" esc/enter: exit search · type to search/filter in response")
+			} else {
+				helpBar = faintStyle.Render(" j/k: scroll response · /: search · y: copy body · h/left: back to left pane · t/tab: toggle tab · q: quit")
+			}
+		} else {
+			helpBar = faintStyle.Render(" j/k: scroll graph · enter: open file in Neovim · h/left: back to left pane · t/tab: toggle tab · q: quit")
+		}
 	} else if m.screen == ListScreen {
 		helpBar = faintStyle.Render(" j/k: navigate · enter: request builder · ctrl+s: execute · t/tab: toggle tab · q: quit")
 	} else {
@@ -971,10 +1075,59 @@ func (m APIModel) leftFormView(height int, width int) string {
 	return lipgloss.JoinVertical(lipgloss.Left, flatLines[:height]...)
 }
 
+func wrapLine(line string, width int) []string {
+	if width <= 0 {
+		return []string{line}
+	}
+	if len(line) <= width {
+		return []string{line}
+	}
+	var wrapped []string
+	for len(line) > width {
+		breakIdx := width
+		for j := width - 1; j > width-15 && j > 0; j-- {
+			if line[j] == ' ' {
+				breakIdx = j
+				break
+			}
+		}
+		wrapped = append(wrapped, line[:breakIdx])
+		line = line[breakIdx:]
+		if len(line) > 0 && line[0] == ' ' {
+			line = line[1:]
+		}
+	}
+	if len(line) > 0 {
+		wrapped = append(wrapped, line)
+	}
+	return wrapped
+}
+
+func (m APIModel) responseLinesCount(width int) int {
+	if m.statusCode <= 0 {
+		return 0
+	}
+	count := 6 // status, latency, empty, [Headers], empty, [Body]
+	for k, v := range m.responseHeaders {
+		line := fmt.Sprintf("%s: %s", k, strings.Join(v, ", "))
+		count += len(wrapLine(line, width-6))
+	}
+	bodyLines := strings.Split(m.responseBody, "\n")
+	for _, line := range bodyLines {
+		count += len(wrapLine(line, width-4))
+	}
+	return count
+}
+
 func (m APIModel) rightResponseView(height int, width int) string {
 	var respLines []string
 
-	respTitle := apiHeaderStyle.Width(width).Render("Response")
+	var respTitle string
+	if m.responseSearchActive {
+		respTitle = apiHeaderStyle.Width(width).Render(fmt.Sprintf("Response (Search: %s_)", m.responseSearchVal))
+	} else {
+		respTitle = apiHeaderStyle.Width(width).Render("Response")
+	}
 	respLines = append(respLines, respTitle, "")
 
 	if m.loading {
@@ -1002,35 +1155,88 @@ func (m APIModel) rightResponseView(height int, width int) string {
 		for _, k := range keys {
 			v := m.responseHeaders[k]
 			line := fmt.Sprintf("%s: %s", k, strings.Join(v, ", "))
-			if len(line) > width-6 {
-				line = line[:width-9] + "…"
+			wrapped := wrapLine(line, width-6)
+			for _, wl := range wrapped {
+				highlighted := wl
+				if m.responseSearchVal != "" {
+					highlighted = highlightMatches(wl, m.responseSearchVal)
+				}
+				respLines = append(respLines, "    "+highlighted)
 			}
-			respLines = append(respLines, "    "+line)
 		}
 		respLines = append(respLines, "", headingStyle.Render("  [Body]"))
 
 		bodyLines := strings.Split(m.responseBody, "\n")
-		maxBodyHeight := height - len(respLines) - 1
-		for i := 0; i < len(bodyLines) && i < maxBodyHeight; i++ {
-			line := bodyLines[i]
-			if len(line) > width-4 {
-				line = line[:width-7] + "…"
+		for _, line := range bodyLines {
+			wrapped := wrapLine(line, width-4)
+			for _, wl := range wrapped {
+				highlighted := wl
+				if m.responseSearchVal != "" {
+					highlighted = highlightMatches(wl, m.responseSearchVal)
+				}
+				respLines = append(respLines, "    "+highlighted)
 			}
-			respLines = append(respLines, "    "+line)
 		}
 	} else {
 		respLines = append(respLines, faintStyle.Render("Press Ctrl+S to send a request."))
 	}
 
-	var flatLines []string
-	for _, l := range respLines {
-		flatLines = append(flatLines, strings.Split(l, "\n")...)
+	titleCount := 2
+	contentLines := respLines[titleCount:]
+
+	contentHeight := height - titleCount
+	if contentHeight < 0 {
+		contentHeight = 0
 	}
 
-	for len(flatLines) < height {
-		flatLines = append(flatLines, "")
+	scrollY := m.responseScrollY
+	if scrollY < 0 {
+		scrollY = 0
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, flatLines[:height]...)
+	if scrollY > len(contentLines)-contentHeight {
+		scrollY = len(contentLines) - contentHeight
+	}
+	if scrollY < 0 {
+		scrollY = 0
+	}
+
+	var visibleLines []string
+	visibleLines = append(visibleLines, respLines[:titleCount]...)
+
+	endIdx := scrollY + contentHeight
+	if endIdx > len(contentLines) {
+		endIdx = len(contentLines)
+	}
+	visibleLines = append(visibleLines, contentLines[scrollY:endIdx]...)
+
+	for len(visibleLines) < height {
+		visibleLines = append(visibleLines, "")
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, visibleLines[:height]...)
+}
+
+func highlightMatches(text string, query string) string {
+	if query == "" {
+		return text
+	}
+	lowerText := strings.ToLower(text)
+	lowerQuery := strings.ToLower(query)
+
+	var result strings.Builder
+	start := 0
+	for {
+		idx := strings.Index(lowerText[start:], lowerQuery)
+		if idx == -1 {
+			break
+		}
+		matchIdx := start + idx
+		result.WriteString(text[start:matchIdx])
+		match := text[matchIdx : matchIdx+len(query)]
+		result.WriteString(searchHighlightStyle.Render(match))
+		start = matchIdx + len(query)
+	}
+	result.WriteString(text[start:])
+	return result.String()
 }
 
 func (m APIModel) rightCallGraphView(height int, width int) string {

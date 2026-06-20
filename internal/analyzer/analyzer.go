@@ -9,6 +9,7 @@ import (
 	"github.com/abhinavdevarakonda/cadr/internal/graph"
 	"github.com/abhinavdevarakonda/cadr/internal/lang"
 	"github.com/abhinavdevarakonda/cadr/internal/types"
+	ignore "github.com/sabhiram/go-gitignore"
 )
 
 type Result struct {
@@ -56,10 +57,32 @@ func Analyze(root string) Result {
 func Scan(root string) (*ScanResult, error) {
 	res := &ScanResult{Root: root}
 
+	var ign *ignore.GitIgnore
+	ignPath := filepath.Join(root, ".gitignore")
+	if _, err := os.Stat(ignPath); err == nil {
+		ign, _ = ignore.CompileIgnoreFile(ignPath)
+	}
+
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
+
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+
+		if ign != nil && ign.MatchesPath(rel) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
 		if info.IsDir() {
 			name := info.Name()
 			if name == ".git" || name == "node_modules" ||
