@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"github.com/atotto/clipboard"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/atotto/clipboard"
 
 	"github.com/abhinavdevarakonda/cadr/internal/frameworks"
 	"github.com/abhinavdevarakonda/cadr/internal/graph"
@@ -59,9 +60,9 @@ var (
 			BorderForeground(lipgloss.Color("240"))
 
 	searchHighlightStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("11")).
-			Foreground(lipgloss.Color("0")).
-			Bold(true)
+				Background(lipgloss.Color("11")).
+				Foreground(lipgloss.Color("0")).
+				Bold(true)
 )
 
 func joinPath(prefix, path string) string {
@@ -1166,7 +1167,7 @@ func (m APIModel) rightResponseView(height int, width int) string {
 		}
 		respLines = append(respLines, "", headingStyle.Render("  [Body]"))
 
-		bodyLines := strings.Split(m.responseBody, "\n")
+		bodyLines := strings.Split(strings.ReplaceAll(m.responseBody, "\r", ""), "\n")
 		for _, line := range bodyLines {
 			wrapped := wrapLine(line, width-4)
 			for _, wl := range wrapped {
@@ -1178,11 +1179,19 @@ func (m APIModel) rightResponseView(height int, width int) string {
 			}
 		}
 	} else {
-		respLines = append(respLines, faintStyle.Render("Press Ctrl+S to send a request."))
+		wrapped := wrapLine("ctrl+s to send a request.", width-4)
+		for _, wl := range wrapped {
+			respLines = append(respLines, faintStyle.Render("  "+wl))
+		}
 	}
 
-	titleCount := 2
-	contentLines := respLines[titleCount:]
+	var flatRespLines []string
+	for _, l := range respLines {
+		flatRespLines = append(flatRespLines, strings.Split(l, "\n")...)
+	}
+
+	titleCount := 3
+	contentLines := flatRespLines[titleCount:]
 
 	contentHeight := height - titleCount
 	if contentHeight < 0 {
@@ -1201,7 +1210,7 @@ func (m APIModel) rightResponseView(height int, width int) string {
 	}
 
 	var visibleLines []string
-	visibleLines = append(visibleLines, respLines[:titleCount]...)
+	visibleLines = append(visibleLines, flatRespLines[:titleCount]...)
 
 	endIdx := scrollY + contentHeight
 	if endIdx > len(contentLines) {
@@ -1248,7 +1257,10 @@ func (m APIModel) rightCallGraphView(height int, width int) string {
 	lines, nodes := m.getCurrentCallTree()
 	if len(nodes) == 0 {
 		for _, l := range lines {
-			renderLines = append(renderLines, l)
+			wrapped := wrapLine(l, width-4)
+			for _, wl := range wrapped {
+				renderLines = append(renderLines, faintStyle.Render("  "+wl))
+			}
 		}
 	} else {
 		// cap selection idx
@@ -1332,18 +1344,18 @@ func (m APIModel) rightCallGraphView(height int, width int) string {
 // call graph tree construction and finding functions
 func (m *APIModel) getCurrentCallTree() ([]string, []*CallTreeNode) {
 	if len(m.filtered) == 0 || m.selectedIdx >= len(m.filtered) {
-		return []string{faintStyle.Render("  No endpoint selected")}, nil
+		return []string{"No endpoint selected"}, nil
 	}
 	ep := m.filtered[m.selectedIdx]
 	handlerNode := findFunctionNode(m.graph, ep)
 	if handlerNode == nil {
-		return []string{faintStyle.Render(fmt.Sprintf("  Could not find handler function '%s' in graph.", ep.HandlerFunc))}, nil
+		return []string{fmt.Sprintf("Could not find handler function '%s' in graph.", ep.HandlerFunc)}, nil
 	}
 
 	visited := make(map[string]bool)
 	tree := buildCallTree(m.graph, handlerNode.ID, 0, 5, visited)
 	if tree == nil {
-		return []string{faintStyle.Render("  Empty call graph")}, nil
+		return []string{"Empty call graph"}, nil
 	}
 
 	var lines []string

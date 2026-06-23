@@ -143,3 +143,17 @@ cadr provides the AI with 12 tools to understand code deeply, these are just a f
 - **`impact_analysis`**: Transitively find all functions affected if this function changes
 - **`get_last_trace`**: Read the last recorded trace from `.cadr/last_run.jsonl` (created by `cadr rec`). Returns function calls with parameters.
 - **`run_trace`**: Run an arbitrary command and trace its function calls dynamically in the background
+
+---
+
+## cadr api (API Explorer)
+
+cadr includes a terminal-native API Explorer to discover, navigate, and execute HTTP requests for your project's endpoints:
+
+```bash
+# Start the API Explorer
+cadr api
+```
+
+For detailed keybindings, request customization, and usage, see the [API Explorer Guide](docs/api_explorer.md).
+
