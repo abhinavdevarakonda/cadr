@@ -232,7 +232,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Trace saved to .cadr/traces/last_run.jsonl\n")
 
 	case "version", "--version", "-v":
-		fmt.Println("cadr version 0.3.0")
+		fmt.Println("cadr version 0.4.0")
 
 	default:
 		fmt.Println("unknown command:", command)
