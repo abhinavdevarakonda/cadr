@@ -70,6 +70,7 @@ func (e *BaseExtractor) ExtractFacts(files []string) ([]types.Fact, error) {
 func (e *BaseExtractor) extractSymbolsFromFile(query *sitter.Query, path string) ([]types.Symbol, error) {
 	parser := sitter.NewParser()
 	parser.SetLanguage(e.language)
+	defer parser.Close()
 
 	source, err := readFile(path)
 	if err != nil {
@@ -114,6 +115,7 @@ func (e *BaseExtractor) extractSymbolsFromFile(query *sitter.Query, path string)
 func (e *BaseExtractor) extractFactsFromFile(query *sitter.Query, path string) ([]types.Fact, error) {
 	parser := sitter.NewParser()
 	parser.SetLanguage(e.language)
+	defer parser.Close()
 
 	source, err := readFile(path)
 	if err != nil {

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/abhinavdevarakonda/cadr/internal/analyzer"
@@ -39,21 +40,26 @@ func runAPICmd(path string) {
 	// Build the static call graph
 	result := analyzer.Analyze(path)
 
-	apiConfig := loadAPIConfig()
+	apiConfig := loadAPIConfig(path)
 	if err := tui.StartAPI(endpoints, apiConfig, result.Graph); err != nil {
 		fmt.Printf("TUI Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func loadAPIConfig() tui.APIConfig {
+func loadAPIConfig(root string) tui.APIConfig {
 	cfg := tui.APIConfig{
 		DefaultURL: "http://localhost:5000",
 		FlaskURL:   "http://localhost:5000",
 		FastAPIURL: "http://localhost:8081",
 	}
 
-	data, err := os.ReadFile("cadr.yaml")
+	cfgPath := filepath.Join(root, ".cadr", "config.yaml")
+	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+		cfgPath = filepath.Join(root, "cadr.yaml")
+	}
+
+	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		return cfg
 	}

@@ -26,6 +26,7 @@ env/
 # Go
 coverage.out
 *.test
+analyzer_test.go
 
 # Node
 node_modules/

@@ -93,7 +93,7 @@ type APICache map[string]SavedRequest
 
 func loadCache() APICache {
 	cache := make(APICache)
-	data, err := os.ReadFile(".cadr/api_cache.json")
+	data, err := os.ReadFile(filepath.Join(".cadr", "cache", "api_cache.json"))
 	if err == nil {
 		_ = json.Unmarshal(data, &cache)
 	}
@@ -101,10 +101,10 @@ func loadCache() APICache {
 }
 
 func saveCache(cache APICache) {
-	_ = os.MkdirAll(".cadr", 0755)
+	_ = os.MkdirAll(filepath.Join(".cadr", "cache"), 0755)
 	data, err := json.MarshalIndent(cache, "", "  ")
 	if err == nil {
-		_ = os.WriteFile(".cadr/api_cache.json", data, 0644)
+		_ = os.WriteFile(filepath.Join(".cadr", "cache", "api_cache.json"), data, 0644)
 	}
 }
 
@@ -154,6 +154,8 @@ type APIModel struct {
 	responseSearchActive bool
 	responseSearchVal    string
 	itemToOpen           *LocationToOpen
+	tempFileToOpen       string
+	tempFileIsBody       bool
 
 	// form & interactive input states
 	focusIdx    int
@@ -480,6 +482,18 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.responseSearchActive = true
 				m.responseSearchVal = ""
 				return m, nil
+			case "enter":
+				tmpDir := filepath.Join(".cadr", "tmp")
+				_ = os.MkdirAll(tmpDir, 0755)
+				f, err := os.CreateTemp(tmpDir, "response-*.json")
+				if err == nil {
+					_, _ = f.WriteString(m.responseBody)
+					f.Close()
+					m.tempFileToOpen = f.Name()
+					m.tempFileIsBody = false
+					return m, tea.Quit
+				}
+				return m, nil
 			case "y":
 				_ = clipboard.WriteAll(m.responseBody)
 				return m, nil
@@ -642,6 +656,18 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.bodyInput.InsertString("  ")
 						return m, nil
 					}
+					if key == "ctrl+e" {
+						tmpDir := filepath.Join(".cadr", "tmp")
+						_ = os.MkdirAll(tmpDir, 0755)
+						f, err := os.CreateTemp(tmpDir, "request-*.json")
+						if err == nil {
+							_, _ = f.WriteString(m.bodyInput.Value())
+							f.Close()
+							m.tempFileToOpen = f.Name()
+							m.tempFileIsBody = true
+							return m, tea.Quit
+						}
+					}
 				}
 
 				if key == "ctrl+a" {
@@ -654,6 +680,12 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.formEditing = false
 					m.updateFocus()
 					return m, nil
+				case "enter":
+					if m.focusIdx != len(m.pathInputs)+2 || !m.methodSupportsBody() {
+						m.formEditing = false
+						m.updateFocus()
+						return m, nil
+					}
 				case "ctrl+s":
 					m.loading = true
 					urlStr := m.getFinalURL()
@@ -716,6 +748,20 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "enter":
 					m.formEditing = true
 					m.updateFocus()
+					return m, nil
+				case "ctrl+e":
+					if m.focusIdx == len(m.pathInputs)+2 && m.methodSupportsBody() {
+						tmpDir := filepath.Join(".cadr", "tmp")
+						_ = os.MkdirAll(tmpDir, 0755)
+						f, err := os.CreateTemp(tmpDir, "request-*.json")
+						if err == nil {
+							_, _ = f.WriteString(m.bodyInput.Value())
+							f.Close()
+							m.tempFileToOpen = f.Name()
+							m.tempFileIsBody = true
+							return m, tea.Quit
+						}
+					}
 					return m, nil
 				case "ctrl+s":
 					m.loading = true
@@ -857,7 +903,7 @@ func (m APIModel) View() string {
 			if m.responseSearchActive {
 				helpBar = faintStyle.Render(" esc/enter: exit search · type to search/filter in response")
 			} else {
-				helpBar = faintStyle.Render(" j/k: scroll response · /: search · y: copy body · h/left: back to left pane · t/tab: toggle tab · q: quit")
+				helpBar = faintStyle.Render(" j/k: scroll response · enter: open in editor · /: search · y: copy body · h/left: back to left pane · t/tab: toggle tab · q: quit")
 			}
 		} else {
 			helpBar = faintStyle.Render(" j/k: scroll graph · enter: open file in Neovim · h/left: back to left pane · t/tab: toggle tab · q: quit")
@@ -866,9 +912,17 @@ func (m APIModel) View() string {
 		helpBar = faintStyle.Render(" j/k: navigate · enter: request builder · ctrl+s: execute · t/tab: toggle tab · q: quit")
 	} else {
 		if m.formEditing {
-			helpBar = faintStyle.Render(" esc: stop editing · ctrl+s: execute request")
+			if m.focusIdx == len(m.pathInputs)+2 && m.methodSupportsBody() {
+				helpBar = faintStyle.Render(" esc: stop editing · ctrl+e: open in editor · ctrl+s: execute request")
+			} else {
+				helpBar = faintStyle.Render(" esc: stop editing · ctrl+s: execute request")
+			}
 		} else {
-			helpBar = faintStyle.Render(" q/H: back to list · j/k: navigate fields · enter: edit field · t/tab: toggle tab · ctrl+s: execute request")
+			if m.focusIdx == len(m.pathInputs)+2 && m.methodSupportsBody() {
+				helpBar = faintStyle.Render(" q/H: back to list · j/k: navigate fields · enter: edit · ctrl+e: open in editor · ctrl+s: execute request")
+			} else {
+				helpBar = faintStyle.Render(" q/H: back to list · j/k: navigate fields · enter: edit field · t/tab: toggle tab · ctrl+s: execute request")
+			}
 		}
 	}
 	statusBar := lipgloss.NewStyle().
@@ -1123,11 +1177,21 @@ func (m APIModel) responseLinesCount(width int) int {
 func (m APIModel) rightResponseView(height int, width int) string {
 	var respLines []string
 
+	var currentHeaderStyle lipgloss.Style
+	if m.focusRight && m.rightTab == TabResponse {
+		currentHeaderStyle = apiHeaderStyle.Copy().
+			Foreground(lipgloss.Color("0")).
+			Background(lipgloss.Color("15")).
+			Bold(true)
+	} else {
+		currentHeaderStyle = apiHeaderStyle
+	}
+
 	var respTitle string
 	if m.responseSearchActive {
-		respTitle = apiHeaderStyle.Width(width).Render(fmt.Sprintf("Response (Search: %s_)", m.responseSearchVal))
+		respTitle = currentHeaderStyle.Width(width).Render(fmt.Sprintf("Response (Search: %s_)", m.responseSearchVal))
 	} else {
-		respTitle = apiHeaderStyle.Width(width).Render("Response")
+		respTitle = currentHeaderStyle.Width(width).Render("Response")
 	}
 	respLines = append(respLines, respTitle, "")
 
@@ -1530,6 +1594,18 @@ func StartAPI(endpoints []frameworks.Endpoint, config APIConfig, g *graph.Graph)
 			if model.itemToOpen != nil {
 				openAPIEditor(model.itemToOpen)
 				model.itemToOpen = nil
+				continue
+			}
+			if model.tempFileToOpen != "" {
+				openAPIEditor(&LocationToOpen{Path: model.tempFileToOpen})
+				if model.tempFileIsBody {
+					if data, err := os.ReadFile(model.tempFileToOpen); err == nil {
+						model.bodyInput.SetValue(string(data))
+					}
+				}
+				_ = os.Remove(model.tempFileToOpen)
+				model.tempFileToOpen = ""
+				model.tempFileIsBody = false
 				continue
 			}
 		}

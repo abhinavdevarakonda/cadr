@@ -947,7 +947,17 @@ func (m Model) View() string {
 			if n != nil {
 				filename := filepath.Base(n.Path)
 				// Line 1: ƒ function_name
-				line1 := funcStyle.Render("ƒ ") + funcStyle.Render(n.Name)
+				funcName := n.Name
+				if lipgloss.Width("ƒ "+funcName) > maxLineW {
+					avail := maxLineW - 3 // 2 for "ƒ ", 1 for "…"
+					if avail > 0 {
+						runes := []rune(funcName)
+						if len(runes) > avail {
+							funcName = string(runes[:avail]) + "…"
+						}
+					}
+				}
+				line1 := funcStyle.Render("ƒ ") + funcStyle.Render(funcName)
 				// Line 2:   file.py:line
 				line2 := "  " + faintStyle.Render(fmt.Sprintf("%s:%d", filename, res.Line))
 				// Line 3:   signature

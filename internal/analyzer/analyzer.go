@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"github.com/abhinavdevarakonda/cadr/internal/types"
 	ignore "github.com/sabhiram/go-gitignore"
 )
+
+var ErrScanLimitExceeded = errors.New("cadr: aborted scanning — scanned more than 50,000 source files. Please configure ignores in .cadr/ignore or .gitignore")
 
 type Result struct {
 	Root  string
@@ -26,23 +29,35 @@ type ScanResult struct {
 func Analyze(root string) Result {
 	scan, err := Scan(root)
 	if err != nil {
+		if errors.Is(err, ErrScanLimitExceeded) {
+			fmt.Fprintln(os.Stderr, err.Error())
+			return Result{Root: root, Graph: graph.New()}
+		}
 		panic(fmt.Sprintf("failed scan: %v", err))
 	}
 
 	langs := lang.All()
-	// fmt.Println("registered languages:", len(langs))
+
+	var totalSrc int
+	for _, l := range langs {
+		totalSrc += len(filterByExtension(scan.Files, l.Extensions()))
+	}
+	if totalSrc > 50000 {
+		fmt.Fprintf(os.Stderr, "cadr: skipping analysis — %d source files is too many (limit: 50000). Set up a .gitignore or use a project-specific directory.\n", totalSrc)
+		return Result{Root: root, Graph: graph.New()}
+	}
+	if totalSrc > 5000 {
+		fmt.Fprintf(os.Stderr, "cadr: warning — analyzing %d source files, this may use a lot of memory\n", totalSrc)
+	}
 
 	var symbols []types.Symbol
 	var facts []types.Fact
 
 	for _, l := range langs {
 		files := filterByExtension(scan.Files, l.Extensions())
-		// fmt.Println("language extensions:", l.Extensions(), "files:", len(files))
 
 		extractedSymbols, _ := l.ExtractSymbols(files)
 		extractedFacts, _ := l.ExtractFacts(files)
-
-		// fmt.Println("symbols:", len(extractedSymbols), "facts:", len(extractedFacts))
 
 		symbols = append(symbols, extractedSymbols...)
 		facts = append(facts, extractedFacts...)
@@ -63,6 +78,20 @@ func Scan(root string) (*ScanResult, error) {
 		ign, _ = ignore.CompileIgnoreFile(ignPath)
 	}
 
+	var cadrIgn *ignore.GitIgnore
+	cadrIgnPath := filepath.Join(root, ".cadr", "ignore")
+	if _, err := os.Stat(cadrIgnPath); err == nil {
+		cadrIgn, _ = ignore.CompileIgnoreFile(cadrIgnPath)
+	}
+
+	langs := lang.All()
+	extsMap := make(map[string]bool)
+	for _, l := range langs {
+		for _, ext := range l.Extensions() {
+			extsMap[ext] = true
+		}
+	}
+
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -76,7 +105,7 @@ func Scan(root string) (*ScanResult, error) {
 			return nil
 		}
 
-		if ign != nil && ign.MatchesPath(rel) {
+		if (ign != nil && ign.MatchesPath(rel)) || (cadrIgn != nil && cadrIgn.MatchesPath(rel)) {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
@@ -85,20 +114,50 @@ func Scan(root string) (*ScanResult, error) {
 
 		if info.IsDir() {
 			name := info.Name()
-			if name == ".git" || name == "node_modules" ||
-				name == "venv" || name == ".venv" ||
-				name == "env" || name == "__pycache__" ||
-				name == ".tox" {
+			if name == ".git" || name == "node_modules" || name == "bower_components" || name == "vendor" ||
+				name == "venv" || name == ".venv" || name == "env" || name == ".env" || name == "virtualenv" ||
+				name == "__pycache__" || name == ".tox" || name == ".pytest_cache" || name == ".mypy_cache" ||
+				name == "dist" || name == "build" || name == "out" || name == "target" || name == "bin" || name == "obj" ||
+				name == ".next" || name == ".nuxt" || name == ".svelte-kit" || name == ".docusaurus" || name == ".vuepress" ||
+				name == ".cache" || name == "tmp" || name == "temp" || name == ".temp" ||
+				name == "coverage" || name == ".nyc_output" ||
+				name == ".idea" || name == ".vscode" || name == ".settings" || name == ".project" {
 				return filepath.SkipDir
 			}
-			res.Directories = append(res.Directories, path)
 			return nil
 		}
-		res.Files = append(res.Files, path)
+
+		ext := filepath.Ext(path)
+		if extsMap[ext] {
+			res.Files = append(res.Files, path)
+			if len(res.Files) > 50000 {
+				return ErrScanLimitExceeded
+			}
+		}
 		return nil
 	})
 
-	return res, err
+	if err != nil {
+		return nil, err
+	}
+
+	// Populate res.Directories dynamically based on the parent paths of res.Files
+	dirsMap := make(map[string]bool)
+	for _, file := range res.Files {
+		dir := filepath.Dir(file)
+		for dir != root && dir != "." && dir != "/" && dir != "" {
+			if dirsMap[dir] {
+				break
+			}
+			dirsMap[dir] = true
+			dir = filepath.Dir(dir)
+		}
+	}
+	for dir := range dirsMap {
+		res.Directories = append(res.Directories, dir)
+	}
+
+	return res, nil
 }
 
 func Build(scan *ScanResult, symbols []types.Symbol, facts []types.Fact) Result {

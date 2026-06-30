@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -182,13 +183,13 @@ func main() {
 		}
 		cmdStr := os.Args[2]
 
-		// Ensure .cadr directory exists
-		if err := os.MkdirAll(".cadr", 0755); err != nil {
-			fmt.Printf("Error creating .cadr dir: %v\n", err)
+		// Ensure .cadr/traces directory exists
+		if err := os.MkdirAll(filepath.Join(".cadr", "traces"), 0755); err != nil {
+			fmt.Printf("Error creating .cadr/traces dir: %v\n", err)
 			os.Exit(1)
 		}
 
-		outFile, err := os.Create(".cadr/last_run.jsonl")
+		outFile, err := os.Create(filepath.Join(".cadr", "traces", "last_run.jsonl"))
 		if err != nil {
 			fmt.Printf("Error creating record file: %v\n", err)
 			os.Exit(1)
@@ -222,13 +223,13 @@ func main() {
 			}
 		}()
 
-		fmt.Fprintf(os.Stderr, "Recording trace to .cadr/last_run.jsonl...\n")
+		fmt.Fprintf(os.Stderr, "Recording trace to .cadr/traces/last_run.jsonl...\n")
 		if err := tracer.Run(cmdStr, func(e tracer.Event) {}); err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
 		}
 		ln.Close()
-		fmt.Fprintf(os.Stderr, "Trace saved to .cadr/last_run.jsonl\n")
+		fmt.Fprintf(os.Stderr, "Trace saved to .cadr/traces/last_run.jsonl\n")
 
 	case "version", "--version", "-v":
 		fmt.Println("cadr version 0.3.0")

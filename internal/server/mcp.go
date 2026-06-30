@@ -225,11 +225,11 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 	})
 
 	s.AddTool(mcp.NewTool("get_last_trace",
-		mcp.WithDescription("Read the last recorded trace from .cadr/last_run.jsonl (created by 'cadr rec'). Returns function calls with parameters."),
+		mcp.WithDescription("Read the last recorded trace from .cadr/traces/last_run.jsonl (created by 'cadr rec'). Returns function calls with parameters."),
 		mcp.WithString("fn", mcp.Description("Optional: filter by function name to only show calls to this function")),
 		mcp.WithNumber("limit", mcp.Description("Optional: max number of events to return (default: all)")),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		tracePath := filepath.Join(result.Root, ".cadr", "last_run.jsonl")
+		tracePath := filepath.Join(result.Root, ".cadr", "traces", "last_run.jsonl")
 		f, err := os.Open(tracePath)
 		if err != nil {
 			return mcp.NewToolResultError("No recorded trace found. Run 'cadr rec <command>' first."), nil
