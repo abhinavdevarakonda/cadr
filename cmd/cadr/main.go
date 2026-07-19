@@ -27,6 +27,21 @@ import (
 var _ = agents.DetectLanguage // reference to avoid unused import
 
 func main() {
+	// Parse and strip global bypass flags
+	for _, arg := range os.Args {
+		if arg == "-y" || arg == "--yes" {
+			analyzer.BypassPrompt = true
+		}
+	}
+
+	var cleanArgs []string
+	for _, arg := range os.Args {
+		if arg != "-y" && arg != "--yes" {
+			cleanArgs = append(cleanArgs, arg)
+		}
+	}
+	os.Args = cleanArgs
+
 	// cadr or cadr <path> → open TUI directly
 	if len(os.Args) < 2 {
 		result := analyzer.Analyze(".")
@@ -160,15 +175,34 @@ func main() {
 		}
 
 	case "run":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: cadr run <command>")
+		var langOverride string
+		cmdIdx := 2
+		if len(os.Args) >= 4 && (os.Args[2] == "-l" || os.Args[2] == "--lang" || os.Args[2] == "--language") {
+			langOverride = os.Args[3]
+			cmdIdx = 4
+		}
+
+		var cmdStr string
+		if len(os.Args) > cmdIdx {
+			cmdStr = os.Args[cmdIdx]
+		} else {
+			var cfgLang string
+			cmdStr, cfgLang = loadDefaultRunCmd(".")
+			if langOverride == "" {
+				langOverride = cfgLang
+			}
+		}
+
+		if cmdStr == "" {
+			fmt.Println("Usage: cadr run [-l <language>] [<command>]")
+			fmt.Println("Error: No command specified, and no 'run_cmd' found in cadr.yaml.")
 			return
 		}
-		cmdStr := os.Args[2]
+
 		// We don't need a callback here because the tracer itself
 		// (if it's our py_trace) will connect to the local socket
 		// server started by 'cadr flow'.
-		if err := tracer.Run(cmdStr, func(e tracer.Event) {
+		if err := tracer.RunWithLang(cmdStr, langOverride, func(e tracer.Event) {
 			// Fallback: If socket fails, we still see something here
 			fmt.Fprintf(os.Stderr, " [TRACE FALLBACK] %s\n", e.Name)
 		}); err != nil {
@@ -177,11 +211,29 @@ func main() {
 		}
 
 	case "rec":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: cadr rec <command>")
+		var langOverride string
+		cmdIdx := 2
+		if len(os.Args) >= 4 && (os.Args[2] == "-l" || os.Args[2] == "--lang" || os.Args[2] == "--language") {
+			langOverride = os.Args[3]
+			cmdIdx = 4
+		}
+
+		var cmdStr string
+		if len(os.Args) > cmdIdx {
+			cmdStr = os.Args[cmdIdx]
+		} else {
+			var cfgLang string
+			cmdStr, cfgLang = loadDefaultRunCmd(".")
+			if langOverride == "" {
+				langOverride = cfgLang
+			}
+		}
+
+		if cmdStr == "" {
+			fmt.Println("Usage: cadr rec [-l <language>] [<command>]")
+			fmt.Println("Error: No command specified, and no 'run_cmd' found in cadr.yaml.")
 			return
 		}
-		cmdStr := os.Args[2]
 
 		// Ensure .cadr/traces directory exists
 		if err := os.MkdirAll(filepath.Join(".cadr", "traces"), 0755); err != nil {
@@ -224,7 +276,7 @@ func main() {
 		}()
 
 		fmt.Fprintf(os.Stderr, "Recording trace to .cadr/traces/last_run.jsonl...\n")
-		if err := tracer.Run(cmdStr, func(e tracer.Event) {}); err != nil {
+		if err := tracer.RunWithLang(cmdStr, langOverride, func(e tracer.Event) {}); err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -269,4 +321,38 @@ func resolveSymbol(g *graph.Graph, input string) (string, error) {
 	}
 
 	return "", fmt.Errorf("symbol %q not found", input)
+}
+
+func loadDefaultRunCmd(root string) (string, string) {
+	cfgPath := filepath.Join(root, ".cadr", "config.yaml")
+	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+		cfgPath = filepath.Join(root, "cadr.yaml")
+	}
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return "", ""
+	}
+
+	var runCmd, runLang string
+	lines := strings.Split(string(data), "\n")
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		parts := strings.SplitN(trimmed, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+
+		if key == "run_cmd" {
+			runCmd = val
+		} else if key == "run_lang" {
+			runLang = val
+		}
+	}
+	return runCmd, runLang
 }

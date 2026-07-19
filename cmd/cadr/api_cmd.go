@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,28 +13,34 @@ import (
 )
 
 func runAPICmd(path string) {
-	scan, err := analyzer.Scan(path)
-	if err != nil {
-		fmt.Printf("Error scanning project: %v\n", err)
-		os.Exit(1)
-	}
+	// Try loading from dynamic endpoints cache first
+	endpoints, err := loadDynamicEndpoints(path)
+	if err == nil && len(endpoints) > 0 {
+		fmt.Printf("Loaded %d endpoints from dynamic cache.\n", len(endpoints))
+	} else {
+		scan, err := analyzer.Scan(path)
+		if err != nil {
+			fmt.Printf("Error scanning project: %v\n", err)
+			os.Exit(1)
+		}
 
-	endpoints, err := frameworks.DetectFlaskEndpoints(scan.Files)
-	if err != nil {
-		fmt.Printf("Error detecting Flask endpoints: %v\n", err)
-		os.Exit(1)
-	}
+		endpoints, err = frameworks.DetectFlaskEndpoints(scan.Files)
+		if err != nil {
+			fmt.Printf("Error detecting Flask endpoints: %v\n", err)
+			os.Exit(1)
+		}
 
-	fastapiEndpoints, err := frameworks.DetectFastAPIEndpoints(scan.Files)
-	if err != nil {
-		fmt.Printf("Error detecting FastAPI endpoints: %v\n", err)
-		os.Exit(1)
-	}
+		fastapiEndpoints, err := frameworks.DetectFastAPIEndpoints(scan.Files)
+		if err != nil {
+			fmt.Printf("Error detecting FastAPI endpoints: %v\n", err)
+			os.Exit(1)
+		}
 
-	endpoints = append(endpoints, fastapiEndpoints...)
+		endpoints = append(endpoints, fastapiEndpoints...)
+	}
 
 	if len(endpoints) == 0 {
-		fmt.Println("No endpoints discovered.")
+		fmt.Println("No endpoints discovered. Try running your app under 'cadr rec' to dynamically harvest routes.")
 		return
 	}
 
@@ -45,6 +52,19 @@ func runAPICmd(path string) {
 		fmt.Printf("TUI Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func loadDynamicEndpoints(root string) ([]frameworks.Endpoint, error) {
+	cachePath := filepath.Join(root, ".cadr", "cache", "endpoints.json")
+	data, err := os.ReadFile(cachePath)
+	if err != nil {
+		return nil, err
+	}
+	var endpoints []frameworks.Endpoint
+	if err := json.Unmarshal(data, &endpoints); err != nil {
+		return nil, err
+	}
+	return endpoints, nil
 }
 
 func loadAPIConfig(root string) tui.APIConfig {

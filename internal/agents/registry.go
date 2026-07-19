@@ -28,7 +28,7 @@ func Get(name string) (Agent, bool) {
 }
 
 func DetectLanguage(cmd string) string {
-	parts := splitCommand(cmd)
+	parts := SplitCommand(cmd)
 	if len(parts) == 0 {
 		return ""
 	}
@@ -37,7 +37,7 @@ func DetectLanguage(cmd string) string {
 	cmdName = strings.TrimSuffix(cmdName, ".exe")
 
 	switch cmdName {
-	case "python", "python3", "py", "flask", "uvicorn", "pytest":
+	case "python", "python3", "py", "flask", "uvicorn", "pytest", "gunicorn":
 		return "python"
 	case "node", "nodejs", "npm":
 		return "javascript"
@@ -58,6 +58,10 @@ func DetectLanguage(cmd string) string {
 }
 
 func splitCommand(cmd string) []string {
+	return SplitCommand(cmd)
+}
+
+func SplitCommand(cmd string) []string {
 	var parts []string
 	var current []byte
 	inQuote := false

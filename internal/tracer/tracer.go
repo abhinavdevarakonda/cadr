@@ -24,15 +24,26 @@ type Recording struct {
 }
 
 func Run(fullCmd string, onEvent func(Event)) error {
-	return runCmd(fullCmd, false, onEvent)
+	return runCmd(fullCmd, "", false, onEvent)
 }
 
 func RunLocal(fullCmd string, onEvent func(Event)) error {
-	return runCmd(fullCmd, true, onEvent)
+	return runCmd(fullCmd, "", true, onEvent)
 }
 
-func runCmd(fullCmd string, localOnly bool, onEvent func(Event)) error {
-	lang := agents.DetectLanguage(fullCmd)
+func RunWithLang(fullCmd string, langOverride string, onEvent func(Event)) error {
+	return runCmd(fullCmd, langOverride, false, onEvent)
+}
+
+func RunLocalWithLang(fullCmd string, langOverride string, onEvent func(Event)) error {
+	return runCmd(fullCmd, langOverride, true, onEvent)
+}
+
+func runCmd(fullCmd string, langOverride string, localOnly bool, onEvent func(Event)) error {
+	lang := langOverride
+	if lang == "" {
+		lang = agents.DetectLanguage(fullCmd)
+	}
 	if lang == "" {
 		return fmt.Errorf("unsupported language for command: %s", fullCmd)
 	}
@@ -42,7 +53,7 @@ func runCmd(fullCmd string, localOnly bool, onEvent func(Event)) error {
 		return fmt.Errorf("no agent registered for language: %s", lang)
 	}
 
-	parts := strings.Fields(fullCmd)
+	parts := agents.SplitCommand(fullCmd)
 	if len(parts) == 0 {
 		return fmt.Errorf("empty command")
 	}

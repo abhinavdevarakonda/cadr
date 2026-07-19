@@ -83,8 +83,90 @@ def trace_calls(frame, event, arg):
         
     return trace_calls
 
+def _extract_path_params(path):
+    import re
+    flask_param_regex = re.compile(r'<(?:([a-zA-Z_]\w*):)?([a-zA-Z_]\w*)>')
+    params = []
+    for match in flask_param_regex.finditer(path):
+        ptype, pname = match.groups()
+        if not ptype:
+            ptype = "string"
+        params.append({"name": pname, "type": ptype})
+    return params
+
+def _save_dynamic_endpoint(rule, view_func, methods):
+    try:
+        os.makedirs(".cadr/cache", exist_ok=True)
+        cache_path = ".cadr/cache/endpoints.json"
+        
+        endpoints = []
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    endpoints = json.load(f)
+            except Exception:
+                pass
+
+        filename = ""
+        line = 0
+        handler_name = ""
+        if view_func:
+            if hasattr(view_func, "__code__"):
+                filename = os.path.abspath(view_func.__code__.co_filename)
+                if filename.startswith(_project_root):
+                    filename = os.path.relpath(filename, _project_root)
+                line = view_func.__code__.co_firstlineno
+            if hasattr(view_func, "__name__"):
+                handler_name = view_func.__name__
+            elif hasattr(view_func, "__class__"):
+                handler_name = view_func.__class__.__name__
+
+        if not methods:
+            methods = ["GET"]
+
+        for m in methods:
+            m = m.upper()
+            exists = False
+            for ep in endpoints:
+                if ep.get("path") == rule and ep.get("method") == m:
+                    exists = True
+                    break
+            if not exists:
+                endpoints.append({
+                    "method": m,
+                    "path": rule,
+                    "handler_func": handler_name,
+                    "file": filename,
+                    "line": line,
+                    "framework": "flask",
+                    "path_params": _extract_path_params(rule)
+                })
+
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(endpoints, f, indent=2)
+    except Exception as e:
+        print(f"cadr: failed to save dynamic endpoint: {e}", file=sys.stderr)
+
+def _patch_flask():
+    try:
+        import flask
+        
+        # Hook Flask.add_url_rule
+        original_app_add = flask.Flask.add_url_rule
+        def patched_app_add(self, rule, endpoint=None, view_func=None, **options):
+            methods = options.get("methods")
+            _save_dynamic_endpoint(rule, view_func, methods)
+            return original_app_add(self, rule, endpoint, view_func, **options)
+        flask.Flask.add_url_rule = patched_app_add
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"cadr: failed to patch flask: {e}", file=sys.stderr)
+
 def start():
     """Initializes the background sender and globally attaches the cadr trace hook."""
+    _patch_flask()
+    
     # Start background sender unless we are explicitly doing a local synchronous trace
     if os.environ.get("CADR_LOCAL_ONLY") != "1":
         t = threading.Thread(target=_sender_thread, daemon=True)

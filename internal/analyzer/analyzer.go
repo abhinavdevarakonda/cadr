@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,8 @@ import (
 )
 
 var ErrScanLimitExceeded = errors.New("cadr: aborted scanning — scanned more than 50,000 source files. Please configure ignores in .cadr/ignore or .gitignore")
+
+var BypassPrompt = false
 
 type Result struct {
 	Root  string
@@ -48,6 +51,12 @@ func Analyze(root string) Result {
 	}
 	if totalSrc > 5000 {
 		fmt.Fprintf(os.Stderr, "cadr: warning — analyzing %d source files, this may use a lot of memory\n", totalSrc)
+		if !hasYesFlag() {
+			if !promptYesNo("Do you want to proceed?") {
+				fmt.Fprintln(os.Stderr, "cadr: aborted analysis.")
+				os.Exit(0)
+			}
+		}
 	}
 
 	var symbols []types.Symbol
@@ -94,6 +103,12 @@ func Scan(root string) (*ScanResult, error) {
 
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			if os.IsPermission(err) || strings.Contains(err.Error(), "permission") || strings.Contains(err.Error(), "not permitted") {
+				if info != nil && info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 			return err
 		}
 
@@ -221,9 +236,16 @@ func Build(scan *ScanResult, symbols []types.Symbol, facts []types.Fact) Result 
 		g.AddEdge(p, sym.ID, graph.ContainsEdge, 0)
 	}
 
+	symbolsByFile := make(map[string][]types.Symbol)
+	symbolsByName := make(map[string][]types.Symbol)
+	for _, sym := range symbols {
+		symbolsByFile[sym.Path] = append(symbolsByFile[sym.Path], sym)
+		symbolsByName[sym.Name] = append(symbolsByName[sym.Name], sym)
+	}
+
 	for _, fact := range facts {
-		caller := findCaller(fact, symbols)
-		callee := findCallee(fact, symbols)
+		caller := findCaller(fact, symbolsByFile)
+		callee := findCallee(fact, symbolsByName)
 		if caller != "" && callee != "" {
 			g.AddEdge(caller, callee, graph.CallsEdge, fact.Line)
 		}
@@ -234,12 +256,8 @@ func Build(scan *ScanResult, symbols []types.Symbol, facts []types.Fact) Result 
 	return Result{Graph: g}
 }
 
-func findCaller(f types.Fact, symbols []types.Symbol) string {
-	for _, sym := range symbols {
-		if sym.Path != f.Path {
-			continue
-		}
-
+func findCaller(f types.Fact, symbolsByFile map[string][]types.Symbol) string {
+	for _, sym := range symbolsByFile[f.Path] {
 		if f.StartLine >= sym.StartLine && f.EndLine <= sym.EndLine {
 			return sym.ID
 		}
@@ -247,15 +265,10 @@ func findCaller(f types.Fact, symbols []types.Symbol) string {
 	return ""
 }
 
-func findCallee(f types.Fact, symbols []types.Symbol) string {
+func findCallee(f types.Fact, symbolsByName map[string][]types.Symbol) string {
 	var candidates []types.Symbol
 
-	// first pass, collect all matching names
-	for _, sym := range symbols {
-		if sym.Name != f.CalleeName {
-			continue
-		}
-
+	for _, sym := range symbolsByName[f.CalleeName] {
 		if f.CalleeQualifier != "" && !strings.Contains(sym.ID, f.CalleeQualifier) {
 			continue
 		}
@@ -296,4 +309,27 @@ func filterByExtension(files []string, exts []string) []string {
 		}
 	}
 	return out
+}
+
+func hasYesFlag() bool {
+	if BypassPrompt {
+		return true
+	}
+	for _, arg := range os.Args {
+		if arg == "-y" || arg == "--yes" {
+			return true
+		}
+	}
+	return false
+}
+
+func promptYesNo(message string) bool {
+	fmt.Fprintf(os.Stderr, "%s [y/N]: ", message)
+	reader := bufio.NewReader(os.Stdin)
+	text, err := reader.ReadString('\n')
+	if err != nil {
+		return false
+	}
+	text = strings.TrimSpace(strings.ToLower(text))
+	return text == "y" || text == "yes"
 }
