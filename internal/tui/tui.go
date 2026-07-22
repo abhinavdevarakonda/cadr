@@ -605,9 +605,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.selected++
 						}
 					}
-				} else if item.Type == graph.FunctionNode && len(m.rightItems) > 0 {
-					m.focus = 1
-					m.rightSelected = 0
+				} else if item.Type == graph.FunctionNode {
+					if (m.rightMode == ModeFlow && len(m.history) > 0) || (m.rightMode != ModeFlow && len(m.rightItems) > 0) {
+						m.focus = 1
+						if m.rightMode != ModeFlow {
+							m.rightSelected = 0
+						}
+					}
 				}
 			}
 		case "i":
