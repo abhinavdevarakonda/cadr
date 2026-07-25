@@ -53,7 +53,7 @@ var (
 	nerdOpen   = "\uf07c "
 	nerdClosed = "\uf07b "
 	nerdFile   = "\uf15b "
-	nerdFunc   = "\uf794 "
+	nerdFunc   = "ƒ "
 )
 
 type Mode string
@@ -1008,9 +1008,13 @@ func (m Model) View() string {
 		modeName = "Flow"
 	}
 	statusLeft := " " + textStyle.Render(m.projectPath) + sep +
-		lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(m.languages) + sep +
-		faintStyle.Render(fmt.Sprintf("%d functions", m.funcCount)) + sep +
-		lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Render(modeName)
+		lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(m.languages)
+
+	if m.width >= 70 {
+		statusLeft += sep + faintStyle.Render(fmt.Sprintf("%d functions", m.funcCount))
+	}
+
+	statusLeft += sep + lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Render(modeName)
 
 	// Right side: trace status (if active)
 	statusRight := ""
@@ -1020,8 +1024,9 @@ func (m Model) View() string {
 		} else {
 			statusRight = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true).Render("PAUSED")
 		}
-		statusRight += " "
-		statusRight += faintStyle.Render(fmt.Sprintf("Hit %d/%d", m.playhead+1, len(m.history)))
+		if m.width >= 80 {
+			statusRight += " " + faintStyle.Render(fmt.Sprintf("Hit %d/%d", m.playhead+1, len(m.history)))
+		}
 	}
 
 	var footerStr string

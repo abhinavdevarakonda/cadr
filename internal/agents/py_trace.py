@@ -9,7 +9,7 @@ import time
 _sock = None
 _event_queue = queue.Queue()
 _sock_connected = threading.Event()
-_project_root = os.getcwd()
+_project_root = os.path.realpath(os.getcwd())
 
 def _sender_thread():
     global _sock
@@ -50,6 +50,8 @@ def trace_calls(frame, event, arg):
     code = frame.f_code
     func_name = code.co_name
     filename = code.co_filename
+    if not filename.startswith("<"):
+        filename = os.path.realpath(os.path.abspath(filename))
     
     # Filter out library calls
     if any(x in filename for x in ["lib/", "site-packages", "<frozen"]):
