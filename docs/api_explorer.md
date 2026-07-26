@@ -1,46 +1,73 @@
 # cadr API Explorer (`cadr api`)
 
-`cadr api` is a terminal-native API client (similar to Postman or curl, but integrated with your codebase graph) that automatically discovers your backend routes and traces their execution paths so you can jump into the code that handles each request and even the functions it calls.
+`cadr api` is a terminal API client (similar to Postman or curl, but integrated with your codebase) that automatically discovers your backend routes, and lets you execute HTTP requests.
+
+---
+
+## Features
+*   **Automatic Route Discovery:** Statically scans your codebase to find endpoints using Tree-sitter AST queries. 
+*   **Vim-Style Navigation:** vim-like Keybindings for navigating, inputting params, and inspecting responses.
+*   **Smart Parameter Persistence:** Automatically caches headers, parameters, path variables, and request body inputs per endpoint.
+
+> Note: cadr currently supports `Flask` and `FastAPI` (because I use those more frequently right now, but some NodeJs frameworks are on the way too!) 
 
 ---
 
 ## Getting Started
 
-To launch the API Explorer, just run the following command in your project's root directory:
+To launch the API Explorer, run the following command in your project's **root directory**:
 
 ```bash
 cadr api
 ```
 
+`cadr` will search for a cached route definition file at `.cadr/cache/endpoints.json`. If there aren't any, a static AST scan of your codebase will find your routes.
+
 ---
 
 ## Layout Overview
 
-The TUI is divided into three zones:
+The TUI is divided into three key panels:
 
-1. **Left Pane (endpoint registry):** Discovered routes parsed from your source files.
-2. **Right Pane (Dynamic/Static Trace & Response):** Shows the execution trace of the request, or if you hit the endpoint, the raw HTTP response.
-3. **Bottom Bar (Request Builder):** Fields to configure the URL path parameters, query parameters, HTTP headers, and JSON request bodies, all fetched from your codebase.
+
+*   **Left pane:** Shows the list of discovered endpoints/routes, with more options for each route.
+*   **Right pane:** Shows the responses and call graphs for each endpoint/route as you hover over them in the left pane.
 
 ---
 
-## Key Actions & Controls
-
-The API Explorer supports standard Vim keybindings for navigation, with keybindings for request firing, response searching, and clipboard copying.
-> for the clipboard copying feature, you do need to have xclip installed on linux, but should work fine with macOS and windows
+## Keybindings & Controls
 
 ### Navigation & Focus
-* `j` / `k` (or `Up` / `Down` Arrow): Scroll up and down.
-* `Tab` / `Shift+Tab`: Cycle focus sequentially through interactive elements:
-* `h` / `l` (or `Left` / `Right` Arrow): Switch focus between the Left Pane (endpoints list) and the Right Pane (response / call graph).
-* `t` / `Tab` (when right pane is focused): Switch the right tab view between **Response** and **Call Graph**.
+*   `j` / `k` (or `Up` / `Down` Arrow): Scroll up and down lists (left pane) and text fields/responses (right pane).
+*   `t` / `Tab`: Toggles through modes of the right pane between call graph to endpoint response for that route.
+*   `h` / `l` (or `Left` / `Right` Arrow): Switch focus between the Left Pane (endpoints list) and the Right Pane (Response / Call Graph). Go back to main route list after inspecting a specific route by also pressing `h`.
+*   `i`: `insert` mode in text areas.
 
-### Firing Requests
-* Press `Ctrl+s` from anywhere (inputs or lists) to send/execute the request. 
-This will also automatically save your *path parameters*, *query parameters*, *headers*, and *body* for that endpoint so they persist when you return to it later. The TUI runs the request concurrently in the background.
+### Executing Requests
+*   **`Ctrl+s` (Send Request):** Pressing `Ctrl+s` from anywhere in the TUI fires the HTTP request to your local dev server.
+*   When a request is executed, your parameters, headers, query inputs, and body values are automatically saved to `.cadr/cache/api_cache.json` so they are pre-filled the next time you hit this endpoint.
 
-### Response Pane Controls
-When the **Response** tab is focused (`l` to focus, then `t` to toggle to Response):
-* **Scroll Response:** Press `j` and `k` to scroll up and down. Long headers or body contents will automatically word-wrap.
-* **Fuzzy Text Search (`/`):** Press `/` to trigger the response search bar. Type any string to instantly find and highlight matches in real-time (using ANSI color styling). Press `Enter` or `Esc` to close the search overlay.
-* **Copy Response Body (`y`):** Press `y` to copy the entire raw HTTP response body directly to your system clipboard (requires `xclip`, `xsel`, or `wl-copy` on Linux; works out-of-the-box on macOS and Windows).
+### Right Pane Tab Control
+When the Right Pane is focused:
+*   **`t` or `Tab`:** Cycles the right-hand panel view mode:
+    *   **Response Tab:** Shows the raw HTTP status code, roundtrip execution latency, response headers, and response body.
+    *   **Call Graph Tab:** Shows you trace of the functions executed on your backend server to handle this specific request.
+*   **`Enter` to open response:** press `enter` on the right pane after hitting an endpoint to open the response in a neovim buffer. 
+        >I specifically use this for bigger responses to save this file in one place to compare later.
+*   **Scroll Response:** Use `j` and `k` to scroll up and down the response body.
+*   **Fuzzy Text Search (`/`):** Press `/` to trigger the response search bar.
+*   **Copy Response Body (`y`):** Copies the raw HTTP response body to your system clipboard (uses `pbcopy` on macOS; `xclip`/`xsel`/`wl-copy` on Linux; `clip` on Windows).
+
+---
+
+<!-- ## Endpoint Detection Details -->
+<!---->
+<!-- `cadr` parses your codebase statically using AST queries: -->
+<!---->
+<!-- ### Flask -->
+<!-- *   **Query File:** [queries/flask.scm](file:///Users/abee/code/me/cadr/queries/flask.scm) -->
+<!-- *   **Scans for:** Blueprints (`Blueprint(...)`), route decorators (`@app.route()`, `@bp.get()`), and extracts route variables like `<int:book_id>`. -->
+<!---->
+<!-- ### FastAPI -->
+<!-- *   **Query File:** [queries/fastapi.scm](file:///Users/abee/code/me/cadr/queries/fastapi.scm) -->
+<!-- *   **Scans for:** APIRouter declarations (`APIRouter(...)`), endpoint decorators (`@app.post()`, `@router.get()`), and path templates like `{book_id}`. -->
