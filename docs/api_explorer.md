@@ -1,5 +1,9 @@
 # cadr API Explorer (`cadr api`)
 
+<p align="center">
+  <img src="../assets/cadr-api-demo.gif" alt="cadr api explorer demo" />
+</p>
+
 `cadr api` is a terminal API client (similar to Postman or curl, but integrated with your codebase) that automatically discovers your backend routes, and lets you execute HTTP requests.
 
 ---

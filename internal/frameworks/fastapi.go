@@ -34,6 +34,8 @@ func DetectFastAPIEndpoints(files []string) ([]Endpoint, error) {
 	}
 	defer query.Close()
 
+	prefixes := getFastAPIMountPrefixes(files)
+
 	for _, file := range files {
 		if !strings.HasSuffix(file, ".py") {
 			continue
@@ -42,6 +44,13 @@ func DetectFastAPIEndpoints(files []string) ([]Endpoint, error) {
 		if err != nil {
 			continue
 		}
+
+		if prefix, exists := prefixes[file]; exists {
+			for i := range fileEndpoints {
+				fileEndpoints[i].Path = joinPath(prefix, fileEndpoints[i].Path)
+			}
+		}
+
 		endpoints = append(endpoints, fileEndpoints...)
 	}
 
@@ -202,4 +211,62 @@ func normalizeFastAPIPath(path string) string {
 		}
 		return fmt.Sprintf("<%s>", name)
 	})
+}
+
+func getFastAPIMountPrefixes(files []string) map[string]string {
+	prefixes := make(map[string]string)
+	mountRegex := regexp.MustCompile(`\.mount\(\s*['"]([^'"]+)['"]\s*,\s*([a-zA-Z0-9_\.]+)\s*\)`)
+
+	for _, file := range files {
+		if !strings.HasSuffix(file, ".py") {
+			continue
+		}
+		contentBytes, err := os.ReadFile(file)
+		if err != nil {
+			continue
+		}
+		content := string(contentBytes)
+		if !strings.Contains(content, "mount(") {
+			continue
+		}
+
+		matches := mountRegex.FindAllStringSubmatch(content, -1)
+		for _, m := range matches {
+			prefix := m[1]
+			varName := m[2]
+			if strings.Contains(varName, ".") {
+				varName = strings.Split(varName, ".")[0]
+			}
+
+			// Find import for this variable name in the same file
+			// Match "from module import varName [as ...]" or "import varName [as ...]"
+			importPattern := `(?:from\s+(\S+)\s+import\s+|import\s+)(?:[a-zA-Z0-9_]+\s+as\s+)?` + regexp.QuoteMeta(varName) + `\b`
+			importRegex, err := regexp.Compile(importPattern)
+			if err != nil {
+				continue
+			}
+			impMatch := importRegex.FindStringSubmatch(content)
+			
+			var modName string
+			if len(impMatch) >= 2 {
+				if impMatch[1] != "" {
+					modParts := strings.Split(impMatch[1], ".")
+					modName = modParts[len(modParts)-1]
+				} else {
+					modName = varName
+				}
+			} else {
+				modName = varName
+			}
+
+			// Find matching file in the workspace
+			for _, f := range files {
+				if strings.HasSuffix(f, "/"+modName+".py") || strings.HasSuffix(f, "\\"+modName+".py") {
+					prefixes[f] = prefix
+					break
+				}
+			}
+		}
+	}
+	return prefixes
 }

@@ -148,7 +148,14 @@ cadr provides the AI with 12 tools to understand code deeply, these are just a f
 
 ## cadr api (API Explorer)
 
+
+# cadr API Explorer (`cadr api`)
+
 cadr includes a terminal-native API Explorer to discover, navigate, and execute HTTP requests for your project's endpoints:
+
+<p align="center">
+  <img src="assets/cadr-api-demo.gif" alt="cadr api explorer demo" />
+</p>
 
 ```bash
 # Start the API Explorer
