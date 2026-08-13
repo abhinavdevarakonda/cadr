@@ -116,3 +116,119 @@ func loadAPIConfig(root string) tui.APIConfig {
 
 	return cfg
 }
+
+type ExternalEndpointRecord struct {
+	Name         string   `json:"name,omitempty"`
+	Method       string   `json:"method"`
+	Path         string   `json:"path"`
+	SavedParams  []string `json:"saved_params,omitempty"`
+	SavedQuery   string   `json:"saved_query,omitempty"`
+	SavedHeaders string   `json:"saved_headers,omitempty"`
+	SavedBody    string   `json:"saved_body,omitempty"`
+	HitCount     int      `json:"hit_count,omitempty"`
+	LastCalled   string   `json:"last_called,omitempty"`
+}
+
+func runAPIAddCmd(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Error: missing endpoint URL. Usage: cadr api add [METHOD] <URL> --name <NAME>")
+		os.Exit(1)
+	}
+
+	method := "GET"
+	urlStr := ""
+	name := ""
+
+	// Parse flags manually
+	var cleanArgs []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--name" || args[i] == "-n" {
+			if i+1 < len(args) {
+				name = args[i+1]
+				i++
+			} else {
+				fmt.Println("Error: missing value for --name flag")
+				os.Exit(1)
+			}
+		} else {
+			cleanArgs = append(cleanArgs, args[i])
+		}
+	}
+
+	if len(cleanArgs) == 0 {
+		fmt.Println("Error: missing endpoint URL. Usage: cadr api add [METHOD] <URL> --name <NAME>")
+		os.Exit(1)
+	}
+
+	if len(cleanArgs) == 1 {
+		urlStr = cleanArgs[0]
+	} else {
+		method = strings.ToUpper(cleanArgs[0])
+		urlStr = cleanArgs[1]
+	}
+
+	// Validate method
+	validMethods := map[string]bool{
+		"GET": true, "POST": true, "PUT": true, "DELETE": true,
+		"PATCH": true, "OPTIONS": true, "HEAD": true,
+	}
+	if !validMethods[method] {
+		if strings.HasPrefix(cleanArgs[0], "http") {
+			urlStr = cleanArgs[0]
+			method = "GET"
+		} else {
+			fmt.Printf("Error: invalid HTTP method '%s'\n", method)
+			os.Exit(1)
+		}
+	}
+
+	err := addExternalEndpoint(method, urlStr, name)
+	if err != nil {
+		fmt.Printf("Error saving external endpoint: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Successfully added global endpoint: %s %s (alias: %s)\n", method, urlStr, name)
+}
+
+func addExternalEndpoint(method, urlStr, name string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	cadrDir := filepath.Join(home, ".cadr")
+	_ = os.MkdirAll(cadrDir, 0755)
+	extPath := filepath.Join(cadrDir, "external_endpoints.json")
+
+	var records []ExternalEndpointRecord
+	data, err := os.ReadFile(extPath)
+	if err == nil {
+		_ = json.Unmarshal(data, &records)
+	}
+
+	// Check if already exists, overwrite if matching method and path
+	found := false
+	for i, r := range records {
+		if r.Method == method && r.Path == urlStr {
+			records[i].Name = name
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		records = append(records, ExternalEndpointRecord{
+			Name:   name,
+			Method: method,
+			Path:   urlStr,
+		})
+	}
+
+	newData, err := json.MarshalIndent(records, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(extPath, newData, 0644)
+}

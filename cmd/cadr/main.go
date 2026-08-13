@@ -75,7 +75,11 @@ func main() {
 
 	switch command {
 	case "api":
-		runAPICmd(path)
+		if len(os.Args) > 2 && os.Args[2] == "add" {
+			runAPIAddCmd(os.Args[3:])
+		} else {
+			runAPICmd(path)
+		}
 
 	case "analyze":
 		result := analyzer.Analyze(path)

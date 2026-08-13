@@ -108,6 +108,138 @@ func saveCache(cache APICache) {
 	}
 }
 
+type ExternalEndpointRecord struct {
+	Name         string   `json:"name,omitempty"`
+	Method       string   `json:"method"`
+	Path         string   `json:"path"`
+	SavedParams  []string `json:"saved_params,omitempty"`
+	SavedQuery   string   `json:"saved_query,omitempty"`
+	SavedHeaders string   `json:"saved_headers,omitempty"`
+	SavedBody    string   `json:"saved_body,omitempty"`
+	HitCount     int      `json:"hit_count,omitempty"`
+	LastCalled   string   `json:"last_called,omitempty"`
+}
+
+func loadExternalEndpoints() []frameworks.Endpoint {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	extPath := filepath.Join(home, ".cadr", "external_endpoints.json")
+	data, err := os.ReadFile(extPath)
+	if err != nil {
+		return nil
+	}
+
+	var records []ExternalEndpointRecord
+	if err := json.Unmarshal(data, &records); err != nil {
+		return nil
+	}
+
+	var endpoints []frameworks.Endpoint
+	for _, r := range records {
+		var params []frameworks.PathParam
+		reFlask := regexp.MustCompile(`<(?:([a-zA-Z_]\w*):)?([a-zA-Z_]\w*)>`)
+		matchesFlask := reFlask.FindAllStringSubmatch(r.Path, -1)
+		for _, m := range matchesFlask {
+			t := "string"
+			if m[1] != "" {
+				t = m[1]
+			}
+			params = append(params, frameworks.PathParam{
+				Name: m[2],
+				Type: t,
+			})
+		}
+
+		reFast := regexp.MustCompile(`{([a-zA-Z_]\w*)(?::([a-zA-Z_]\w*))?}`)
+		matchesFast := reFast.FindAllStringSubmatch(r.Path, -1)
+		for _, m := range matchesFast {
+			t := "string"
+			if m[2] != "" {
+				t = m[2]
+			}
+			params = append(params, frameworks.PathParam{
+				Name: m[1],
+				Type: t,
+			})
+		}
+
+		endpoints = append(endpoints, frameworks.Endpoint{
+			Method:      r.Method,
+			Path:        r.Path,
+			HandlerFunc: r.Name, // Store alias Name in HandlerFunc
+			Framework:   "external",
+			PathParams:  params,
+		})
+	}
+	return endpoints
+}
+
+func saveExternalEndpointPersistence(method, urlStr string, savedParams []string, savedQuery, savedHeaders, savedBody string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	cadrDir := filepath.Join(home, ".cadr")
+	_ = os.MkdirAll(cadrDir, 0755)
+	extPath := filepath.Join(cadrDir, "external_endpoints.json")
+
+	var records []ExternalEndpointRecord
+	data, err := os.ReadFile(extPath)
+	if err == nil {
+		_ = json.Unmarshal(data, &records)
+	}
+
+	for i, r := range records {
+		if r.Method == method && r.Path == urlStr {
+			records[i].SavedParams = savedParams
+			records[i].SavedQuery = savedQuery
+			records[i].SavedHeaders = savedHeaders
+			records[i].SavedBody = savedBody
+			records[i].HitCount++
+			records[i].LastCalled = time.Now().Format(time.RFC3339)
+			break
+		}
+	}
+
+	newData, err := json.MarshalIndent(records, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(extPath, newData, 0644)
+	}
+}
+
+func loadExternalEndpointPersistence(method, urlStr string) (SavedRequest, bool) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return SavedRequest{}, false
+	}
+	extPath := filepath.Join(home, ".cadr", "external_endpoints.json")
+	data, err := os.ReadFile(extPath)
+	if err != nil {
+		return SavedRequest{}, false
+	}
+
+	var records []ExternalEndpointRecord
+	if err := json.Unmarshal(data, &records); err != nil {
+		return SavedRequest{}, false
+	}
+
+	for _, r := range records {
+		if r.Method == method && r.Path == urlStr {
+			return SavedRequest{
+				PathParams:  r.SavedParams,
+				QueryParams: r.SavedQuery,
+				Headers:     r.SavedHeaders,
+				Body:        r.SavedBody,
+				HitCount:    r.HitCount,
+				LastCalled:  r.LastCalled,
+			}, true
+		}
+	}
+	return SavedRequest{}, false
+}
+
 type APIScreen int
 
 const (
@@ -135,11 +267,15 @@ type APIConfig struct {
 
 // TUI model definition
 type APIModel struct {
-	endpoints   []frameworks.Endpoint
-	filtered    []frameworks.Endpoint
-	selectedIdx int
-	apiConfig   APIConfig
-	graph       *graph.Graph
+	endpoints            []frameworks.Endpoint
+	filtered             []frameworks.Endpoint
+	selectedIdx          int
+	activeSection        int // 0: Local/Discovered, 1: Global/External
+	externalEndpoints    []frameworks.Endpoint
+	filteredExternal     []frameworks.Endpoint
+	selectedExternalIdx  int
+	apiConfig            APIConfig
+	graph                *graph.Graph
 
 	// ui screen state
 	screen               APIScreen
@@ -188,13 +324,19 @@ func (m APIModel) Init() tea.Cmd {
 
 // input management helpers
 func (m *APIModel) initForm() {
-	ep := m.filtered[m.selectedIdx]
+	ep := m.getCurrentEndpoint()
 	m.focusIdx = 0
 	m.formEditing = false
 
-	cache := loadCache()
-	key := ep.Method + ":" + ep.Path
-	saved, hasSaved := cache[key]
+	var saved SavedRequest
+	var hasSaved bool
+	if ep.Framework == "external" {
+		saved, hasSaved = loadExternalEndpointPersistence(ep.Method, ep.Path)
+	} else {
+		cache := loadCache()
+		key := ep.Method + ":" + ep.Path
+		saved, hasSaved = cache[key]
+	}
 
 	halfWidth := m.width / 2
 	if halfWidth <= 0 {
@@ -309,10 +451,7 @@ func (m *APIModel) setSelectedAll(val bool) {
 }
 
 func (m *APIModel) methodSupportsBody() bool {
-	if len(m.filtered) == 0 || m.selectedIdx >= len(m.filtered) {
-		return false
-	}
-	ep := m.filtered[m.selectedIdx]
+	ep := m.getCurrentEndpoint()
 	method := strings.ToUpper(ep.Method)
 	return method == "POST" || method == "PUT" || method == "PATCH"
 }
@@ -326,8 +465,21 @@ func (m *APIModel) resolveTargetURL(ep frameworks.Endpoint) string {
 	return m.apiConfig.DefaultURL
 }
 
+func (m *APIModel) getCurrentEndpoint() frameworks.Endpoint {
+	if m.activeSection == 1 {
+		if len(m.filteredExternal) > 0 && m.selectedExternalIdx < len(m.filteredExternal) {
+			return m.filteredExternal[m.selectedExternalIdx]
+		}
+	} else {
+		if len(m.filtered) > 0 && m.selectedIdx < len(m.filtered) {
+			return m.filtered[m.selectedIdx]
+		}
+	}
+	return frameworks.Endpoint{}
+}
+
 func (m *APIModel) getFinalURL() string {
-	ep := m.filtered[m.selectedIdx]
+	ep := m.getCurrentEndpoint()
 	path := ep.Path
 
 	for i, p := range ep.PathParams {
@@ -340,8 +492,14 @@ func (m *APIModel) getFinalURL() string {
 		path = strings.ReplaceAll(path, fmt.Sprintf("<%s>", p.Name), val)
 	}
 
-	target := m.resolveTargetURL(ep)
-	urlStr := joinPath(target, path)
+	var urlStr string
+	if ep.Framework == "external" {
+		urlStr = path
+	} else {
+		target := m.resolveTargetURL(ep)
+		urlStr = joinPath(target, path)
+	}
+
 	if m.queryInput.Value() != "" {
 		urlStr += "?" + m.queryInput.Value()
 	}
@@ -351,17 +509,27 @@ func (m *APIModel) getFinalURL() string {
 func (m *APIModel) applyFilter() {
 	if m.searchVal == "" {
 		m.filtered = m.endpoints
+		m.filteredExternal = m.externalEndpoints
 	} else {
-		var filtered []frameworks.Endpoint
 		q := strings.ToLower(m.searchVal)
+		var filtered []frameworks.Endpoint
 		for _, ep := range m.endpoints {
 			if strings.Contains(strings.ToLower(ep.Path), q) || strings.Contains(strings.ToLower(ep.Method), q) {
 				filtered = append(filtered, ep)
 			}
 		}
 		m.filtered = filtered
+
+		var filteredExt []frameworks.Endpoint
+		for _, ep := range m.externalEndpoints {
+			if strings.Contains(strings.ToLower(ep.Path), q) || strings.Contains(strings.ToLower(ep.Method), q) || strings.Contains(strings.ToLower(ep.HandlerFunc), q) {
+				filteredExt = append(filteredExt, ep)
+			}
+		}
+		m.filteredExternal = filteredExt
 	}
 	m.selectedIdx = 0
+	m.selectedExternalIdx = 0
 }
 
 // http request runner
@@ -503,8 +671,13 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				width := rightWidth - 4
 
 				var targetHost string
-				if len(m.filtered) > 0 && m.selectedIdx < len(m.filtered) {
-					targetHost = m.resolveTargetURL(m.filtered[m.selectedIdx])
+				epSelected := m.getCurrentEndpoint()
+				if epSelected.Method != "" {
+					if epSelected.Framework == "external" {
+						targetHost = epSelected.Path
+					} else {
+						targetHost = m.resolveTargetURL(epSelected)
+					}
 				} else {
 					targetHost = m.apiConfig.DefaultURL
 				}
@@ -567,15 +740,37 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "q":
 				return m, tea.Quit
 			case "j", "down":
-				if m.selectedIdx < len(m.filtered)-1 {
-					m.selectedIdx++
+				if m.activeSection == 1 {
+					if m.selectedExternalIdx < len(m.filteredExternal)-1 {
+						m.selectedExternalIdx++
+					}
+				} else {
+					if m.selectedIdx < len(m.filtered)-1 {
+						m.selectedIdx++
+					}
 				}
 			case "k", "up":
-				if m.selectedIdx > 0 {
-					m.selectedIdx--
+				if m.activeSection == 1 {
+					if m.selectedExternalIdx > 0 {
+						m.selectedExternalIdx--
+					}
+				} else {
+					if m.selectedIdx > 0 {
+						m.selectedIdx--
+					}
 				}
+			case "[":
+				m.activeSection = 0
+				ep := m.getCurrentEndpoint()
+				if ep.Framework == "external" {
+					m.rightTab = TabResponse
+				}
+			case "]":
+				m.activeSection = 1
+				m.rightTab = TabResponse
 			case "l", "right":
-				if m.rightTab == TabCallGraph {
+				ep := m.getCurrentEndpoint()
+				if ep.Framework != "external" && m.rightTab == TabCallGraph {
 					_, nodes := m.getCurrentCallTree()
 					if len(nodes) > 0 {
 						m.focusRight = true
@@ -586,26 +781,36 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.responseScrollY = 0
 				}
 			case "t", "tab":
-				if m.rightTab == TabResponse {
-					m.rightTab = TabCallGraph
-				} else {
-					m.rightTab = TabResponse
+				ep := m.getCurrentEndpoint()
+				if ep.Framework != "external" {
+					if m.rightTab == TabResponse {
+						m.rightTab = TabCallGraph
+					} else {
+						m.rightTab = TabResponse
+					}
 				}
 			case "/":
 				m.searchActive = true
 				m.searchVal = ""
 			case "enter":
-				if len(m.filtered) > 0 {
+				ep := m.getCurrentEndpoint()
+				if ep.Method != "" {
 					m.screen = FormScreen
 					m.initForm()
 				}
 			case "ctrl+s":
-				// run request directly from list using cached configurations
-				if len(m.filtered) > 0 {
-					ep := m.filtered[m.selectedIdx]
-					cache := loadCache()
-					key := ep.Method + ":" + ep.Path
-					saved, hasSaved := cache[key]
+				ep := m.getCurrentEndpoint()
+				if ep.Method != "" {
+					var saved SavedRequest
+					var hasSaved bool
+					if ep.Framework == "external" {
+						saved, hasSaved = loadExternalEndpointPersistence(ep.Method, ep.Path)
+					} else {
+						cache := loadCache()
+						key := ep.Method + ":" + ep.Path
+						saved, hasSaved = cache[key]
+					}
+
 					if !hasSaved {
 						saved = SavedRequest{
 							PathParams: make([]string, len(ep.PathParams)),
@@ -626,8 +831,14 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						path = strings.ReplaceAll(path, fmt.Sprintf("<%s>", p.Name), val)
 					}
 
-					target := m.resolveTargetURL(ep)
-					urlStr := joinPath(target, path)
+					var urlStr string
+					if ep.Framework == "external" {
+						urlStr = path
+					} else {
+						target := m.resolveTargetURL(ep)
+						urlStr = joinPath(target, path)
+					}
+
 					if saved.QueryParams != "" {
 						urlStr += "?" + saved.QueryParams
 					}
@@ -636,10 +847,16 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.rightTab = TabResponse
 					m.responseScrollY = 0
 
-					saved.HitCount++
-					saved.LastCalled = time.Now().Format(time.RFC3339)
-					cache[key] = saved
-					saveCache(cache)
+					if ep.Framework == "external" {
+						saveExternalEndpointPersistence(ep.Method, ep.Path, saved.PathParams, saved.QueryParams, saved.Headers, saved.Body)
+					} else {
+						cache := loadCache()
+						key := ep.Method + ":" + ep.Path
+						saved.HitCount++
+						saved.LastCalled = time.Now().Format(time.RFC3339)
+						cache[key] = saved
+						saveCache(cache)
+					}
 
 					cmd := sendRequest(ep.Method, urlStr, saved.Body, saved.Headers)
 					return m, cmd
@@ -689,7 +906,7 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "ctrl+s":
 					m.loading = true
 					urlStr := m.getFinalURL()
-					ep := m.filtered[m.selectedIdx]
+					ep := m.getCurrentEndpoint()
 					bodyVal := ""
 					if m.methodSupportsBody() {
 						bodyVal = m.bodyInput.Value()
@@ -699,17 +916,22 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					for _, ti := range m.pathInputs {
 						pathVals = append(pathVals, ti.Value())
 					}
-					cache := loadCache()
-					key := ep.Method + ":" + ep.Path
-					saved := cache[key]
-					saved.PathParams = pathVals
-					saved.QueryParams = m.queryInput.Value()
-					saved.Headers = m.headerInput.Value()
-					saved.Body = bodyVal
-					saved.HitCount++
-					saved.LastCalled = time.Now().Format(time.RFC3339)
-					cache[key] = saved
-					saveCache(cache)
+
+					if ep.Framework == "external" {
+						saveExternalEndpointPersistence(ep.Method, ep.Path, pathVals, m.queryInput.Value(), m.headerInput.Value(), bodyVal)
+					} else {
+						cache := loadCache()
+						key := ep.Method + ":" + ep.Path
+						saved := cache[key]
+						saved.PathParams = pathVals
+						saved.QueryParams = m.queryInput.Value()
+						saved.Headers = m.headerInput.Value()
+						saved.Body = bodyVal
+						saved.HitCount++
+						saved.LastCalled = time.Now().Format(time.RFC3339)
+						cache[key] = saved
+						saveCache(cache)
+					}
 
 					m.rightTab = TabResponse
 					m.responseScrollY = 0
@@ -723,7 +945,8 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.screen = ListScreen
 					return m, nil
 				case "l", "right":
-					if m.rightTab == TabCallGraph {
+					ep := m.getCurrentEndpoint()
+					if ep.Framework != "external" && m.rightTab == TabCallGraph {
 						_, nodes := m.getCurrentCallTree()
 						if len(nodes) > 0 {
 							m.focusRight = true
@@ -734,10 +957,13 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.responseScrollY = 0
 					}
 				case "t", "tab":
-					if m.rightTab == TabResponse {
-						m.rightTab = TabCallGraph
-					} else {
-						m.rightTab = TabResponse
+					ep := m.getCurrentEndpoint()
+					if ep.Framework != "external" {
+						if m.rightTab == TabResponse {
+							m.rightTab = TabCallGraph
+						} else {
+							m.rightTab = TabResponse
+						}
 					}
 				case "j", "down":
 					m.focusInput(m.focusIdx + 1)
@@ -766,7 +992,7 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "ctrl+s":
 					m.loading = true
 					urlStr := m.getFinalURL()
-					ep := m.filtered[m.selectedIdx]
+					ep := m.getCurrentEndpoint()
 					bodyVal := ""
 					if m.methodSupportsBody() {
 						bodyVal = m.bodyInput.Value()
@@ -776,17 +1002,22 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					for _, ti := range m.pathInputs {
 						pathVals = append(pathVals, ti.Value())
 					}
-					cache := loadCache()
-					key := ep.Method + ":" + ep.Path
-					saved := cache[key]
-					saved.PathParams = pathVals
-					saved.QueryParams = m.queryInput.Value()
-					saved.Headers = m.headerInput.Value()
-					saved.Body = bodyVal
-					saved.HitCount++
-					saved.LastCalled = time.Now().Format(time.RFC3339)
-					cache[key] = saved
-					saveCache(cache)
+
+					if ep.Framework == "external" {
+						saveExternalEndpointPersistence(ep.Method, ep.Path, pathVals, m.queryInput.Value(), m.headerInput.Value(), bodyVal)
+					} else {
+						cache := loadCache()
+						key := ep.Method + ":" + ep.Path
+						saved := cache[key]
+						saved.PathParams = pathVals
+						saved.QueryParams = m.queryInput.Value()
+						saved.Headers = m.headerInput.Value()
+						saved.Body = bodyVal
+						saved.HitCount++
+						saved.LastCalled = time.Now().Format(time.RFC3339)
+						cache[key] = saved
+						saveCache(cache)
+					}
 
 					m.rightTab = TabResponse
 					m.responseScrollY = 0
@@ -801,8 +1032,13 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		if msg.err != nil {
 			m.statusCode = 500
-			ep := m.filtered[m.selectedIdx]
-			target := m.resolveTargetURL(ep)
+			ep := m.getCurrentEndpoint()
+			var target string
+			if ep.Framework == "external" {
+				target = ep.Path
+			} else {
+				target = m.resolveTargetURL(ep)
+			}
 			m.responseBody = fmt.Sprintf("Error: %v\n\nIs your API server running at %s?", msg.err, target)
 			m.responseHeaders = nil
 		} else {
@@ -885,8 +1121,13 @@ func (m APIModel) View() string {
 
 	// 1. top bar (shows target host for currently selected endpoint)
 	var targetHost string
-	if len(m.filtered) > 0 && m.selectedIdx < len(m.filtered) {
-		targetHost = m.resolveTargetURL(m.filtered[m.selectedIdx])
+	epSelected := m.getCurrentEndpoint()
+	if epSelected.Method != "" {
+		if epSelected.Framework == "external" {
+			targetHost = epSelected.Path
+		} else {
+			targetHost = m.resolveTargetURL(epSelected)
+		}
 	} else {
 		targetHost = m.apiConfig.DefaultURL
 	}
@@ -952,7 +1193,7 @@ func (m APIModel) View() string {
 	}
 
 	var rightView string
-	if m.rightTab == TabCallGraph {
+	if epSelected.Framework != "external" && m.rightTab == TabCallGraph {
 		rightView = m.rightCallGraphView(contentHeight, rightWidth-4)
 	} else {
 		rightView = m.rightResponseView(contentHeight, rightWidth-4)
@@ -968,80 +1209,164 @@ func (m APIModel) View() string {
 
 func (m APIModel) leftListView(height int, width int) string {
 	var lines []string
-	header := "Discovered Endpoints"
-	if m.searchActive {
-		header = fmt.Sprintf("Search: %s_", m.searchVal)
+
+	itemsPerPage := (height - 2) / 4
+	if itemsPerPage <= 0 {
+		itemsPerPage = 1
 	}
-	lines = append(lines, apiHeaderStyle.Width(width).Render(header))
-	lines = append(lines, "")
 
-	if len(m.filtered) == 0 {
-		lines = append(lines, faintStyle.Render("  No endpoints found."))
-	} else {
-		// each endpoint block takes exactly 4 lines (method, path, stats, space)
-		itemsPerPage := (height - 2) / 4
-		if itemsPerPage <= 0 {
-			itemsPerPage = 1
+	if m.activeSection == 0 {
+		localHeader := "Local Endpoints"
+		if m.searchActive {
+			localHeader = fmt.Sprintf("Local Endpoints (Search: %s_)", m.searchVal)
 		}
+		lines = append(lines, apiHeaderStyle.Width(width).Render(localHeader))
+		lines = append(lines, "")
 
-		start := 0
-		if len(m.filtered) > itemsPerPage {
-			if m.selectedIdx >= itemsPerPage/2 {
-				start = m.selectedIdx - itemsPerPage/2
-			}
-			if start+itemsPerPage > len(m.filtered) {
-				start = len(m.filtered) - itemsPerPage
-			}
-			if start < 0 {
-				start = 0
-			}
-		}
-
-		for i := start; i < len(m.filtered) && i < start+itemsPerPage; i++ {
-			ep := m.filtered[i]
-			methodPrefix := "  "
-			if !m.focusRight && i == m.selectedIdx {
-				methodPrefix = "> "
+		if len(m.filtered) == 0 {
+			lines = append(lines, faintStyle.Render("  No local endpoints found."))
+		} else {
+			start := 0
+			if len(m.filtered) > itemsPerPage {
+				if m.selectedIdx >= itemsPerPage/2 {
+					start = m.selectedIdx - itemsPerPage/2
+				}
+				if start+itemsPerPage > len(m.filtered) {
+					start = len(m.filtered) - itemsPerPage
+				}
+				if start < 0 {
+					start = 0
+				}
 			}
 
-			method := methodStyle(ep.Method).Render(ep.Method)
-			path := cleanPathParams(ep.Path)
+			for i := start; i < len(m.filtered) && i < start+itemsPerPage; i++ {
+				ep := m.filtered[i]
+				methodPrefix := "  "
+				if !m.focusRight && i == m.selectedIdx {
+					methodPrefix = "> "
+				}
 
-			pathStr := path
-			if len(pathStr) > width-2 {
-				pathStr = pathStr[:width-5] + "…"
-			}
-			if !m.focusRight && i == m.selectedIdx {
-				pathStr = selectedStyle.Render(pathStr)
-			}
+				method := methodStyle(ep.Method).Render(ep.Method)
+				path := cleanPathParams(ep.Path)
 
-			// get cached statistics
-			cache := loadCache()
-			key := ep.Method + ":" + ep.Path
-			saved, hasSaved := cache[key]
-			stats := ""
-			if hasSaved && saved.HitCount > 0 {
-				timeStr := "-"
-				if saved.LastCalled != "" {
-					t, err := time.Parse(time.RFC3339, saved.LastCalled)
-					if err == nil {
-						timeStr = formatRelativeTime(t)
+				pathStr := path
+				if len(pathStr) > width-2 {
+					pathStr = pathStr[:width-5] + "…"
+				}
+				if !m.focusRight && i == m.selectedIdx {
+					pathStr = selectedStyle.Render(pathStr)
+				}
+
+				cache := loadCache()
+				key := ep.Method + ":" + ep.Path
+				saved, hasSaved := cache[key]
+				stats := ""
+				if hasSaved && saved.HitCount > 0 {
+					timeStr := "-"
+					if saved.LastCalled != "" {
+						t, err := time.Parse(time.RFC3339, saved.LastCalled)
+						if err == nil {
+							timeStr = formatRelativeTime(t)
+						}
 					}
+					stats = fmt.Sprintf("  • %d hits • %s", saved.HitCount, timeStr)
 				}
-				stats = fmt.Sprintf("  • %d hits • %s", saved.HitCount, timeStr)
-			}
 
-			lines = append(lines, fmt.Sprintf("%s%s", methodPrefix, method))
-			lines = append(lines, fmt.Sprintf("  %s", pathStr))
-			if stats != "" {
-				if len(stats) > width-2 {
-					stats = stats[:width-5] + "…"
+				lines = append(lines, fmt.Sprintf("%s%s", methodPrefix, method))
+				lines = append(lines, fmt.Sprintf("  %s", pathStr))
+				if stats != "" {
+					if len(stats) > width-2 {
+						stats = stats[:width-5] + "…"
+					}
+					lines = append(lines, faintStyle.Render("  "+stats))
+				} else {
+					lines = append(lines, "")
 				}
-				lines = append(lines, faintStyle.Render("  "+stats))
-			} else {
 				lines = append(lines, "")
 			}
-			lines = append(lines, "")
+		}
+	} else {
+		globalHeader := "Global Endpoints"
+		if m.searchActive {
+			globalHeader = fmt.Sprintf("Global Endpoints (Search: %s_)", m.searchVal)
+		}
+		lines = append(lines, apiHeaderStyle.Width(width).Render(globalHeader))
+		lines = append(lines, "")
+
+		if len(m.filteredExternal) == 0 {
+			lines = append(lines, faintStyle.Render("  No global endpoints found."))
+		} else {
+			start := 0
+			if len(m.filteredExternal) > itemsPerPage {
+				if m.selectedExternalIdx >= itemsPerPage/2 {
+					start = m.selectedExternalIdx - itemsPerPage/2
+				}
+				if start+itemsPerPage > len(m.filteredExternal) {
+					start = len(m.filteredExternal) - itemsPerPage
+				}
+				if start < 0 {
+					start = 0
+				}
+			}
+
+			for i := start; i < len(m.filteredExternal) && i < start+itemsPerPage; i++ {
+				ep := m.filteredExternal[i]
+				methodPrefix := "  "
+				if !m.focusRight && i == m.selectedExternalIdx {
+					methodPrefix = "> "
+				}
+
+				method := methodStyle(ep.Method).Render(ep.Method)
+				var line2, line3 string
+				saved, hasSaved := loadExternalEndpointPersistence(ep.Method, ep.Path)
+
+				if ep.HandlerFunc != "" {
+					line2 = ep.HandlerFunc
+					line3 = ep.Path
+				} else {
+					line2 = ep.Path
+					if hasSaved && saved.HitCount > 0 {
+						timeStr := "-"
+						if saved.LastCalled != "" {
+							t, err := time.Parse(time.RFC3339, saved.LastCalled)
+							if err == nil {
+								timeStr = formatRelativeTime(t)
+							}
+						}
+						line3 = fmt.Sprintf("  • %d hits • %s", saved.HitCount, timeStr)
+					} else {
+						line3 = ""
+					}
+				}
+
+				if len(line2) > width-2 {
+					line2 = line2[:width-5] + "…"
+				}
+				if !m.focusRight && i == m.selectedExternalIdx {
+					line2 = selectedStyle.Render(line2)
+				}
+
+				if line3 != "" && !strings.HasPrefix(line3, "  •") {
+					if len(line3) > width-2 {
+						line3 = line3[:width-5] + "…"
+					}
+					line3 = faintStyle.Render("  " + line3)
+				} else if line3 != "" {
+					if len(line3) > width-2 {
+						line3 = line3[:width-5] + "…"
+					}
+					line3 = faintStyle.Render(line3)
+				}
+
+				lines = append(lines, fmt.Sprintf("%s%s", methodPrefix, method))
+				lines = append(lines, fmt.Sprintf("  %s", line2))
+				if line3 != "" {
+					lines = append(lines, line3)
+				} else {
+					lines = append(lines, "")
+				}
+				lines = append(lines, "")
+			}
 		}
 	}
 
@@ -1062,7 +1387,7 @@ func (m APIModel) leftFormView(height int, width int) string {
 	reqTitle := apiHeaderStyle.Width(width).Render("Request Builder")
 	reqLines = append(reqLines, reqTitle, "")
 
-	ep := m.filtered[m.selectedIdx]
+	ep := m.getCurrentEndpoint()
 
 	if len(m.pathInputs) > 0 {
 		for i, ti := range m.pathInputs {
@@ -1407,10 +1732,10 @@ func (m APIModel) rightCallGraphView(height int, width int) string {
 
 // call graph tree construction and finding functions
 func (m *APIModel) getCurrentCallTree() ([]string, []*CallTreeNode) {
-	if len(m.filtered) == 0 || m.selectedIdx >= len(m.filtered) {
-		return []string{"No endpoint selected"}, nil
+	ep := m.getCurrentEndpoint()
+	if ep.Method == "" || ep.Framework == "external" {
+		return []string{"No call graph available for external endpoints."}, nil
 	}
-	ep := m.filtered[m.selectedIdx]
 	handlerNode := findFunctionNode(m.graph, ep)
 	if handlerNode == nil {
 		return []string{fmt.Sprintf("Could not find handler function '%s' in graph.", ep.HandlerFunc)}, nil
@@ -1573,13 +1898,16 @@ func openAPIEditor(loc *LocationToOpen) {
 
 // entry point
 func StartAPI(endpoints []frameworks.Endpoint, config APIConfig, g *graph.Graph) error {
+	extEndpoints := loadExternalEndpoints()
 	model := APIModel{
-		endpoints: endpoints,
-		filtered:  endpoints,
-		apiConfig: config,
-		screen:    ListScreen,
-		graph:     g,
-		rightTab:  TabCallGraph,
+		endpoints:         endpoints,
+		filtered:          endpoints,
+		externalEndpoints: extEndpoints,
+		filteredExternal:  extEndpoints,
+		apiConfig:         config,
+		screen:            ListScreen,
+		graph:             g,
+		rightTab:          TabCallGraph,
 	}
 	model.bodyInput = textarea.New()
 
