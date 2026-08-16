@@ -75,11 +75,32 @@ func main() {
 
 	switch command {
 	case "api":
-		if len(os.Args) > 2 && os.Args[2] == "add" {
-			runAPIAddCmd(os.Args[3:])
-		} else {
-			runAPICmd(path)
+		if len(os.Args) > 2 {
+			sub := os.Args[2]
+			if sub == "add" || sub == "list" || sub == "delete" || sub == "rm" {
+				switch sub {
+				case "add":
+					runAPIAddCmd(os.Args[3:])
+				case "list":
+					runAPIListCmd(os.Args[3:])
+				case "delete", "rm":
+					runAPIDeleteCmd(os.Args[3:])
+				}
+				return
+			}
 		}
+
+		globalMode := false
+		targetPath := "."
+		for i := 2; i < len(os.Args); i++ {
+			arg := os.Args[i]
+			if arg == "--global" || arg == "-g" {
+				globalMode = true
+			} else if !strings.HasPrefix(arg, "-") {
+				targetPath = arg
+			}
+		}
+		runAPICmd(targetPath, globalMode)
 
 	case "analyze":
 		result := analyzer.Analyze(path)

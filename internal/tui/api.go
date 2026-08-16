@@ -1897,17 +1897,24 @@ func openAPIEditor(loc *LocationToOpen) {
 }
 
 // entry point
-func StartAPI(endpoints []frameworks.Endpoint, config APIConfig, g *graph.Graph) error {
+func StartAPI(endpoints []frameworks.Endpoint, config APIConfig, g *graph.Graph, startGlobal bool) error {
 	extEndpoints := loadExternalEndpoints()
+	activeSec := 0
+	rTab := TabCallGraph
+	if startGlobal || len(endpoints) == 0 {
+		activeSec = 1
+		rTab = TabResponse
+	}
 	model := APIModel{
 		endpoints:         endpoints,
 		filtered:          endpoints,
 		externalEndpoints: extEndpoints,
 		filteredExternal:  extEndpoints,
+		activeSection:     activeSec,
 		apiConfig:         config,
 		screen:            ListScreen,
 		graph:             g,
-		rightTab:          TabCallGraph,
+		rightTab:          rTab,
 	}
 	model.bodyInput = textarea.New()
 

@@ -9,46 +9,45 @@ import (
 
 	"github.com/abhinavdevarakonda/cadr/internal/analyzer"
 	"github.com/abhinavdevarakonda/cadr/internal/frameworks"
+	"github.com/abhinavdevarakonda/cadr/internal/graph"
 	"github.com/abhinavdevarakonda/cadr/internal/tui"
 )
 
-func runAPICmd(path string) {
-	// Try loading from dynamic endpoints cache first
-	endpoints, err := loadDynamicEndpoints(path)
-	if err == nil && len(endpoints) > 0 {
-		fmt.Printf("Loaded %d endpoints from dynamic cache.\n", len(endpoints))
-	} else {
-		scan, err := analyzer.Scan(path)
-		if err != nil {
-			fmt.Printf("Error scanning project: %v\n", err)
-			os.Exit(1)
+func runAPICmd(path string, globalMode bool) {
+	var endpoints []frameworks.Endpoint
+	var g *graph.Graph
+
+	startGlobal := globalMode
+
+	if !globalMode {
+		var err error
+		endpoints, err = loadDynamicEndpoints(path)
+		if err == nil && len(endpoints) > 0 {
+			fmt.Printf("Loaded %d endpoints from dynamic cache.\n", len(endpoints))
+		} else {
+			scan, err := analyzer.Scan(path)
+			if err == nil {
+				flaskEps, err := frameworks.DetectFlaskEndpoints(scan.Files)
+				if err == nil {
+					endpoints = append(endpoints, flaskEps...)
+				}
+				fastapiEps, err := frameworks.DetectFastAPIEndpoints(scan.Files)
+				if err == nil {
+					endpoints = append(endpoints, fastapiEps...)
+				}
+			}
 		}
 
-		endpoints, err = frameworks.DetectFlaskEndpoints(scan.Files)
-		if err != nil {
-			fmt.Printf("Error detecting Flask endpoints: %v\n", err)
-			os.Exit(1)
+		if len(endpoints) == 0 {
+			startGlobal = true
+		} else {
+			result := analyzer.Analyze(path)
+			g = result.Graph
 		}
-
-		fastapiEndpoints, err := frameworks.DetectFastAPIEndpoints(scan.Files)
-		if err != nil {
-			fmt.Printf("Error detecting FastAPI endpoints: %v\n", err)
-			os.Exit(1)
-		}
-
-		endpoints = append(endpoints, fastapiEndpoints...)
 	}
-
-	if len(endpoints) == 0 {
-		fmt.Println("No endpoints discovered. Try running your app under 'cadr rec' to dynamically harvest routes.")
-		return
-	}
-
-	// Build the static call graph
-	result := analyzer.Analyze(path)
 
 	apiConfig := loadAPIConfig(path)
-	if err := tui.StartAPI(endpoints, apiConfig, result.Graph); err != nil {
+	if err := tui.StartAPI(endpoints, apiConfig, g, startGlobal); err != nil {
 		fmt.Printf("TUI Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -231,4 +230,190 @@ func addExternalEndpoint(method, urlStr, name string) error {
 	}
 
 	return os.WriteFile(extPath, newData, 0644)
+}
+
+func runAPIListCmd(args []string) {
+	local := false
+	for _, arg := range args {
+		if arg == "--local" || arg == "-l" {
+			local = true
+			break
+		}
+	}
+
+	if local {
+		runLocalAPIList()
+		return
+	}
+
+	runGlobalAPIList()
+}
+
+func runLocalAPIList() {
+	endpoints, err := loadDynamicEndpoints(".")
+	if err != nil || len(endpoints) == 0 {
+		scan, err := analyzer.Scan(".")
+		if err != nil {
+			fmt.Printf("Error scanning project: %v\n", err)
+			os.Exit(1)
+		}
+
+		endpoints, err = frameworks.DetectFlaskEndpoints(scan.Files)
+		if err != nil {
+			fmt.Printf("Error detecting Flask endpoints: %v\n", err)
+			os.Exit(1)
+		}
+
+		fastapiEndpoints, err := frameworks.DetectFastAPIEndpoints(scan.Files)
+		if err != nil {
+			fmt.Printf("Error detecting FastAPI endpoints: %v\n", err)
+			os.Exit(1)
+		}
+
+		endpoints = append(endpoints, fastapiEndpoints...)
+	}
+
+	if len(endpoints) == 0 {
+		fmt.Println("No local endpoints discovered in current directory.")
+		return
+	}
+
+	apiConfig := loadAPIConfig(".")
+	fmt.Println("Local Codebase Endpoints:")
+	fmt.Printf("Base URL: %s\n", apiConfig.DefaultURL)
+	fmt.Println("--------------------------------------------------------------------------------")
+	fmt.Printf("%-8s %-40s %s\n", "METHOD", "PATH", "FILE:LINE")
+	fmt.Println("--------------------------------------------------------------------------------")
+	for _, ep := range endpoints {
+		fileLine := fmt.Sprintf("%s:%d", ep.File, ep.Line)
+		if ep.File == "" {
+			fileLine = "-"
+		}
+		path := ep.Path
+		if len(path) > 40 {
+			path = path[:37] + "..."
+		}
+		fmt.Printf("%-8s %-40s %s\n", ep.Method, path, fileLine)
+	}
+	fmt.Println("--------------------------------------------------------------------------------")
+}
+
+func runGlobalAPIList() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	extPath := filepath.Join(home, ".cadr", "external_endpoints.json")
+	data, err := os.ReadFile(extPath)
+	if err != nil {
+		fmt.Println("No global endpoints registered yet.")
+		return
+	}
+
+	var records []ExternalEndpointRecord
+	if err := json.Unmarshal(data, &records); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(records) == 0 {
+		fmt.Println("No global endpoints registered yet.")
+		return
+	}
+
+	fmt.Println("Global External Endpoints:")
+	fmt.Println("--------------------------------------------------------------------------------")
+	fmt.Printf("%-20s %-8s %s\n", "ALIAS/NAME", "METHOD", "URL")
+	fmt.Println("--------------------------------------------------------------------------------")
+	for _, r := range records {
+		name := r.Name
+		if name == "" {
+			name = "-"
+		}
+		urlStr := r.Path
+		if len(urlStr) > 45 {
+			urlStr = urlStr[:42] + "..."
+		}
+		fmt.Printf("%-20s %-8s %s\n", name, r.Method, urlStr)
+	}
+	fmt.Println("--------------------------------------------------------------------------------")
+}
+
+func runAPIDeleteCmd(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Error: missing identifier. Usage: cadr api delete <NAME> or cadr api delete <METHOD> <URL>")
+		os.Exit(1)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	extPath := filepath.Join(home, ".cadr", "external_endpoints.json")
+	data, err := os.ReadFile(extPath)
+	if err != nil {
+		fmt.Println("No global endpoints registered.")
+		return
+	}
+
+	var records []ExternalEndpointRecord
+	if err := json.Unmarshal(data, &records); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	var newRecords []ExternalEndpointRecord
+	found := false
+	var deletedName, deletedMethod, deletedURL string
+
+	if len(args) == 1 {
+		targetName := args[0]
+		for _, r := range records {
+			if r.Name == targetName && targetName != "" {
+				found = true
+				deletedName = r.Name
+				deletedMethod = r.Method
+				deletedURL = r.Path
+			} else {
+				newRecords = append(newRecords, r)
+			}
+		}
+	} else {
+		method := strings.ToUpper(args[0])
+		urlStr := args[1]
+		for _, r := range records {
+			if r.Method == method && r.Path == urlStr {
+				found = true
+				deletedName = r.Name
+				deletedMethod = r.Method
+				deletedURL = r.Path
+			} else {
+				newRecords = append(newRecords, r)
+			}
+		}
+	}
+
+	if !found {
+		fmt.Println("Error: endpoint not found in global registry.")
+		os.Exit(1)
+	}
+
+	newData, err := json.MarshalIndent(newRecords, "", "  ")
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := os.WriteFile(extPath, newData, 0644); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if deletedName != "" {
+		fmt.Printf("Successfully deleted global endpoint: %s (%s %s)\n", deletedName, deletedMethod, deletedURL)
+	} else {
+		fmt.Printf("Successfully deleted global endpoint: %s %s\n", deletedMethod, deletedURL)
+	}
 }
