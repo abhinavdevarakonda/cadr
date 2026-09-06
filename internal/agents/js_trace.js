@@ -3,7 +3,8 @@ const path = require('path');
 const Module = require('module');
 
 const PROJECT_ROOT = process.cwd();
-const PORT = 9876;
+const SOCK_PATH = process.env.CADR_SOCKET;
+const TCP_PORT = process.env.CADR_TCP ? parseInt(process.env.CADR_TCP, 10) : 9876;
 
 let sock = null;
 let connected = false;
@@ -11,20 +12,31 @@ const eventQueue = [];
 
 function connect() {
     sock = new net.Socket();
-    sock.connect(PORT, 'localhost', () => {
+    sock.unref();
+    const onConnected = () => {
         connected = true;
+        sock.unref();
         process.stderr.write('cadr: Connected to monitor.\n');
         while (eventQueue.length > 0) {
             trySend(eventQueue.shift());
         }
-    });
+    };
+
+    if (SOCK_PATH && process.platform !== 'win32') {
+        sock.connect(SOCK_PATH, onConnected);
+    } else {
+        sock.connect(TCP_PORT, 'localhost', onConnected);
+    }
+
     sock.on('error', () => {
         connected = false;
-        setTimeout(connect, 1000);
+        const t = setTimeout(connect, 1000);
+        if (t.unref) t.unref();
     });
     sock.on('close', () => {
         connected = false;
-        setTimeout(connect, 1000);
+        const t = setTimeout(connect, 1000);
+        if (t.unref) t.unref();
     });
 }
 

@@ -27,18 +27,40 @@ import (
 var _ = agents.DetectLanguage // reference to avoid unused import
 
 func main() {
-	// Parse and strip global bypass flags
-	for _, arg := range os.Args {
+	// Parse and strip global flags (-y, --yes, --tcp)
+	var cleanArgs []string
+	for i := 0; i < len(os.Args); i++ {
+		arg := os.Args[i]
 		if arg == "-y" || arg == "--yes" {
 			analyzer.BypassPrompt = true
+			continue
 		}
-	}
-
-	var cleanArgs []string
-	for _, arg := range os.Args {
-		if arg != "-y" && arg != "--yes" {
-			cleanArgs = append(cleanArgs, arg)
+		if arg == "--tcp" {
+			os.Setenv("CADR_FORCE_TCP", "1")
+			if i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "-") {
+				isPort := true
+				for _, c := range os.Args[i+1] {
+					if c < '0' || c > '9' {
+						isPort = false
+						break
+					}
+				}
+				if isPort {
+					os.Setenv("CADR_TCP_PORT", os.Args[i+1])
+					i++
+				}
+			}
+			continue
 		}
+		if strings.HasPrefix(arg, "--tcp=") {
+			os.Setenv("CADR_FORCE_TCP", "1")
+			port := strings.TrimPrefix(arg, "--tcp=")
+			if port != "" {
+				os.Setenv("CADR_TCP_PORT", port)
+			}
+			continue
+		}
+		cleanArgs = append(cleanArgs, arg)
 	}
 	os.Args = cleanArgs
 
@@ -209,7 +231,7 @@ func main() {
 
 		var cmdStr string
 		if len(os.Args) > cmdIdx {
-			cmdStr = os.Args[cmdIdx]
+			cmdStr = strings.Join(os.Args[cmdIdx:], " ")
 		} else {
 			var cfgLang string
 			cmdStr, cfgLang = loadDefaultRunCmd(".")
@@ -245,7 +267,7 @@ func main() {
 
 		var cmdStr string
 		if len(os.Args) > cmdIdx {
-			cmdStr = os.Args[cmdIdx]
+			cmdStr = strings.Join(os.Args[cmdIdx:], " ")
 		} else {
 			var cfgLang string
 			cmdStr, cfgLang = loadDefaultRunCmd(".")
@@ -275,8 +297,16 @@ func main() {
 		writer := bufio.NewWriter(outFile)
 		var mu sync.Mutex
 
-		// Start TCP listener so the agent can connect
-		ln, err := net.Listen("tcp", "localhost:9876")
+		// Start listener so the agent can connect (UDS or TCP according to config)
+		cfg := tracer.LoadConfig(".")
+		var ln net.Listener
+		if cfg.Protocol == "tcp" {
+			ln, err = net.Listen("tcp", "localhost:"+cfg.Port)
+		} else {
+			_ = os.Remove(cfg.Socket)
+			ln, err = net.Listen("unix", cfg.Socket)
+			defer os.Remove(cfg.Socket)
+		}
 		if err != nil {
 			fmt.Printf("Error starting listener: %v\n", err)
 			os.Exit(1)

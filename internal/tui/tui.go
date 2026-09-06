@@ -760,6 +760,11 @@ func (m Model) View() string {
 	}
 
 	halfWidth := m.width / 2
+	contentWidth := halfWidth - 4
+	if contentWidth < 10 {
+		contentWidth = 10
+	}
+	clipStyle := lipgloss.NewStyle().MaxWidth(contentWidth)
 
 	// 2. Left Pane (Structure)
 	leftLines := make([]string, 0, paneHeight)
@@ -767,7 +772,7 @@ func (m Model) View() string {
 	if m.focus == 0 {
 		leftHeader = "> " + leftHeader
 	}
-	leftLines = append(leftLines, headerStyle.Width(halfWidth-4).Render(leftHeader))
+	leftLines = append(leftLines, headerStyle.Width(contentWidth).Render(leftHeader))
 	leftLines = append(leftLines, "")
 
 	start := 0
@@ -870,7 +875,7 @@ func (m Model) View() string {
 			}
 		} else if i == m.selected && m.focus == 0 {
 			// pad to pane width
-			padLen := (halfWidth - 4) - lipgloss.Width(line)
+			padLen := contentWidth - lipgloss.Width(line)
 			if padLen < 0 {
 				padLen = 0
 			}
@@ -881,9 +886,12 @@ func (m Model) View() string {
 		} else {
 			line = indentStr + faintStyle.Render(icon) + nameStyle.Render(item.Name)
 		}
-		leftLines = append(leftLines, line)
+		leftLines = append(leftLines, clipStyle.Render(line))
 	}
 
+	if len(leftLines) > paneHeight {
+		leftLines = leftLines[:paneHeight]
+	}
 	for len(leftLines) < paneHeight {
 		leftLines = append(leftLines, "")
 	}
@@ -905,7 +913,7 @@ func (m Model) View() string {
 	if m.focus == 1 {
 		rightTitle = "> " + rightTitle
 	}
-	rightLines = append(rightLines, headerStyle.Width(halfWidth-4).Render(rightTitle))
+	rightLines = append(rightLines, headerStyle.Width(contentWidth).Render(rightTitle))
 	rightLines = append(rightLines, "")
 
 	if m.rightMode == ModeFlow {
@@ -938,54 +946,44 @@ func (m Model) View() string {
 			if i == m.playhead {
 				line = glowStyle.Render(line)
 			}
-			rightLines = append(rightLines, line)
+			rightLines = append(rightLines, clipStyle.Render(line))
 		}
 	} else if len(m.rightItems) > 0 {
-		maxLineW := halfWidth - 6 // account for pane padding
 		for i := 0; i < len(m.rightItems); i++ {
-			if len(rightLines) >= paneHeight-2 {
+			if len(rightLines) >= paneHeight {
 				break
 			}
 			res := m.rightItems[i]
 			n := m.graph.Nodes[res.ID]
 			if n != nil {
 				filename := filepath.Base(n.Path)
-				// Line 1: ƒ function_name
 				funcName := n.Name
-				if lipgloss.Width("ƒ "+funcName) > maxLineW {
-					avail := maxLineW - 3 // 2 for "ƒ ", 1 for "…"
-					if avail > 0 {
-						runes := []rune(funcName)
-						if len(runes) > avail {
-							funcName = string(runes[:avail]) + "…"
-						}
-					}
-				}
 				line1 := funcStyle.Render("ƒ ") + funcStyle.Render(funcName)
-				// Line 2:   file.py:line
 				line2 := "  " + faintStyle.Render(fmt.Sprintf("%s:%d", filename, res.Line))
-				// Line 3:   signature
 				sig := getSignature(n.Path, res.Line)
 				line3 := ""
 				if sig != "" {
-					if lipgloss.Width(sig) > maxLineW-2 {
-						sig = sig[:maxLineW-5] + "…"
-					}
 					line3 = "  " + faintStyle.Italic(true).Render(sig)
 				}
 				if i == m.rightSelected && m.focus == 1 {
-					padLen := maxLineW - lipgloss.Width(line1)
+					padLen := contentWidth - lipgloss.Width(line1)
 					if padLen < 0 {
 						padLen = 0
 					}
 					line1 = selectedStyle.Render(line1 + strings.Repeat(" ", padLen))
 				}
-				rightLines = append(rightLines, line1, line2)
-				if line3 != "" {
-					rightLines = append(rightLines, line3)
+				rightLines = append(rightLines, clipStyle.Render(line1))
+				if len(rightLines) < paneHeight {
+					rightLines = append(rightLines, clipStyle.Render(line2))
+				}
+				if line3 != "" && len(rightLines) < paneHeight {
+					rightLines = append(rightLines, clipStyle.Render(line3))
 				}
 			}
 		}
+	}
+	if len(rightLines) > paneHeight {
+		rightLines = rightLines[:paneHeight]
 	}
 	for len(rightLines) < paneHeight {
 		rightLines = append(rightLines, "")
@@ -1122,15 +1120,16 @@ func openEditor(item *TreeItem) error {
 func Start(g *graph.Graph, projectRoot string) error {
 	m := NewModel(g, projectRoot)
 
-	// Passive Listening: Nav listens but doesn't error if port is busy (another cadr might be open)
+	// Passive Listening: Nav listens on project socket/port
 	var prog *tea.Program
-	go func() {
-		tracer.Listen(func(e tracer.Event) {
-			if prog != nil {
-				prog.Send(TraceEventMsg(e))
-			}
-		})
-	}()
+	listener, _ := tracer.StartListener(projectRoot, func(e tracer.Event) {
+		if prog != nil {
+			prog.Send(TraceEventMsg(e))
+		}
+	})
+	if listener != nil {
+		defer listener.Close()
+	}
 
 	for {
 		prog = tea.NewProgram(&m, tea.WithAltScreen())
@@ -1155,18 +1154,18 @@ func StartMonitor(g *graph.Graph, target string, projectRoot string) error {
 	m.isMonitoring = true
 	m.rightMode = ModeFlow
 
-	// Active Listening: Error if port is busy
+	// Active Listening: Error if socket/port is busy
 	var prog *tea.Program
-	go func() {
-		if err := tracer.Listen(func(e tracer.Event) {
-			if prog != nil {
-				prog.Send(TraceEventMsg(e))
-			}
-		}); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: monitor could not start on port 9876: %v\n", err)
-			os.Exit(1)
+	listener, err := tracer.StartListener(projectRoot, func(e tracer.Event) {
+		if prog != nil {
+			prog.Send(TraceEventMsg(e))
 		}
-	}()
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: monitor could not start listener: %v\n", err)
+		os.Exit(1)
+	}
+	defer listener.Close()
 
 	// Optionally start the target
 	if target != "" {

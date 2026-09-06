@@ -13,10 +13,19 @@ _project_root = os.getcwd()
 
 def _sender_thread():
     global _sock
+    sock_path = os.environ.get("CADR_SOCKET")
+    tcp_port_str = os.environ.get("CADR_TCP")
+    use_uds = bool(sock_path and hasattr(socket, "AF_UNIX"))
+
     while True:
         try:
-            _sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            _sock.connect(("localhost", 9876))
+            if use_uds:
+                _sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                _sock.connect(sock_path)
+            else:
+                port = int(tcp_port_str) if tcp_port_str else 9876
+                _sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                _sock.connect(("localhost", port))
             _sock_connected.set()
             print("cadr: Connected to monitor.", file=sys.stderr)
             
