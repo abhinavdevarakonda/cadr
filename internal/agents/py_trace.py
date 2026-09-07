@@ -51,27 +51,37 @@ def _safe_repr(value):
     except Exception:
         return "<unserializable>"
 
+_filename_cache = {}
+
 def trace_calls(frame, event, arg):
     """Callback for sys.settrace. Captures function calls and emits JSON metadata."""
     if event != 'call':
         return None
     
     code = frame.f_code
-    func_name = code.co_name
-    filename = code.co_filename
-    if not filename.startswith("<"):
-        filename = os.path.realpath(os.path.abspath(filename))
-    
-    # Filter out library calls
-    if any(x in filename for x in ["lib/", "site-packages", "<frozen"]):
-        return None
+    raw = code.co_filename
+
+    # Fast in-memory cache lookup (< 5 nanoseconds)
+    if raw in _filename_cache:
+        filename = _filename_cache[raw]
+        if filename is None:
+            return None
+    else:
+        # Layer 1 & 2: Fast-reject libraries and bytecode before touching disk
+        if raw.startswith("<") or "site-packages" in raw or "lib/python" in raw:
+            _filename_cache[raw] = None
+            return None
+        
+        # Resolve once and verify it belongs to project
+        filename = os.path.realpath(os.path.abspath(raw))
+        if _project_root not in filename or any(x in filename for x in ["lib/", "site-packages", "<frozen"]):
+            _filename_cache[raw] = None
+            return None
+        _filename_cache[raw] = filename
         
     # Filter out useless internal Python noise
+    func_name = code.co_name
     if func_name in ["<module>", "<genexpr>", "<listcomp>", "<dictcomp>", "__annotate__", "root"]:
-        return None
-    
-    # Only trace project files
-    if _project_root not in filename:
         return None
 
     # Capture parameter names (args defined in the function signature)

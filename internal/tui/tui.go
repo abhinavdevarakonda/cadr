@@ -65,6 +65,7 @@ const (
 )
 
 type TraceEventMsg tracer.Event
+type TraceBatchMsg []tracer.Event
 
 type Model struct {
 	graph         *graph.Graph
@@ -352,6 +353,18 @@ func getSignature(path string, line int) string {
 		currentLine++
 	}
 	return ""
+}
+
+func (m *Model) applyTraceEvent(e tracer.Event) {
+	m.history = append(m.history, e)
+
+	// Update Heatmap
+	for id, n := range m.graph.Nodes {
+		if n.Type == graph.FunctionNode && (n.Name == e.Name || strings.HasSuffix(e.Name, "."+n.Name)) && strings.HasSuffix(e.File, n.Path) {
+			m.hitCounts[id]++
+			break
+		}
+	}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -702,17 +715,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case TraceEventMsg:
-		m.history = append(m.history, tracer.Event(msg))
-
-		// Update Heatmap
-		for id, n := range m.graph.Nodes {
-			if n.Type == graph.FunctionNode && (n.Name == msg.Name || strings.HasSuffix(msg.Name, "."+n.Name)) && strings.HasSuffix(msg.File, n.Path) {
-				m.hitCounts[id]++
-				break
+		m.applyTraceEvent(tracer.Event(msg))
+		if m.isLive {
+			m.playhead = len(m.history) - 1
+			if m.followLive {
+				m.syncToHistory()
 			}
 		}
-
-		if m.isLive {
+	case TraceBatchMsg:
+		for _, e := range msg {
+			m.applyTraceEvent(e)
+		}
+		if m.isLive && len(msg) > 0 {
 			m.playhead = len(m.history) - 1
 			if m.followLive {
 				m.syncToHistory()
@@ -1117,15 +1131,67 @@ func openEditor(item *TreeItem) error {
 	return nil
 }
 
+func startEventDispatcher(getProg func() *tea.Program) chan<- tracer.Event {
+	events := make(chan tracer.Event, 10000)
+
+	go func() {
+		var batch []tracer.Event
+		var ticker *time.Ticker
+		var tickerChan <-chan time.Time
+
+		flush := func() {
+			if len(batch) == 0 {
+				return
+			}
+			prog := getProg()
+			if prog != nil {
+				if len(batch) == 1 {
+					prog.Send(TraceEventMsg(batch[0]))
+				} else {
+					toSend := make([]tracer.Event, len(batch))
+					copy(toSend, batch)
+					prog.Send(TraceBatchMsg(toSend))
+				}
+			}
+			batch = nil
+			if ticker != nil {
+				ticker.Stop()
+				ticker = nil
+				tickerChan = nil
+			}
+		}
+
+		for {
+			select {
+			case e, ok := <-events:
+				if !ok {
+					flush()
+					return
+				}
+				batch = append(batch, e)
+				if ticker == nil {
+					ticker = time.NewTicker(33 * time.Millisecond)
+					tickerChan = ticker.C
+				}
+
+			case <-tickerChan:
+				flush()
+			}
+		}
+	}()
+
+	return events
+}
+
 func Start(g *graph.Graph, projectRoot string) error {
 	m := NewModel(g, projectRoot)
 
 	// Passive Listening: Nav listens on project socket/port
 	var prog *tea.Program
+	eventChan := startEventDispatcher(func() *tea.Program { return prog })
+
 	listener, _ := tracer.StartListener(projectRoot, func(e tracer.Event) {
-		if prog != nil {
-			prog.Send(TraceEventMsg(e))
-		}
+		eventChan <- e
 	})
 	if listener != nil {
 		defer listener.Close()
@@ -1156,10 +1222,10 @@ func StartMonitor(g *graph.Graph, target string, projectRoot string) error {
 
 	// Active Listening: Error if socket/port is busy
 	var prog *tea.Program
+	eventChan := startEventDispatcher(func() *tea.Program { return prog })
+
 	listener, err := tracer.StartListener(projectRoot, func(e tracer.Event) {
-		if prog != nil {
-			prog.Send(TraceEventMsg(e))
-		}
+		eventChan <- e
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: monitor could not start listener: %v\n", err)
@@ -1172,9 +1238,7 @@ func StartMonitor(g *graph.Graph, target string, projectRoot string) error {
 		go func() {
 			time.Sleep(100 * time.Millisecond)
 			tracer.Run(target, func(e tracer.Event) {
-				if prog != nil {
-					prog.Send(TraceEventMsg(e))
-				}
+				eventChan <- e
 			})
 		}()
 	}
