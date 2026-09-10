@@ -508,9 +508,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "ctrl+j":
 			if m.focus == 0 {
-				m.selected += jump
-				if m.selected >= len(m.items) {
-					m.selected = len(m.items) - 1
+				if len(m.items) > 0 {
+					m.selected += jump
+					if m.selected >= len(m.items) {
+						m.selected = len(m.items) - 1
+					}
 				}
 			} else {
 				if m.rightMode == ModeFlow {
@@ -553,7 +555,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "G":
 			if m.focus == 0 {
-				m.selected = len(m.items) - 1
+				if len(m.items) > 0 {
+					m.selected = len(m.items) - 1
+				}
 			} else {
 				m.playhead = len(m.history) - 1
 			}
@@ -591,7 +595,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "h", "left":
 			if m.focus == 1 {
 				m.focus = 0
-			} else {
+			} else if len(m.items) > 0 {
 				item := &m.items[m.selected]
 				if m.expanded[item.ID] && item.HasC {
 					m.expanded[item.ID] = false
@@ -607,7 +611,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "l", "right":
-			if m.focus == 0 {
+			if m.focus == 0 && len(m.items) > 0 {
 				item := &m.items[m.selected]
 				if item.HasC {
 					if !m.expanded[item.ID] {
@@ -645,6 +649,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			if m.focus == 0 {
+				if len(m.items) == 0 {
+					break
+				}
 				item := m.items[m.selected]
 				if item.Type == graph.DirectoryNode {
 					m.expanded[item.ID] = !m.expanded[item.ID]
@@ -800,6 +807,10 @@ func (m Model) View() string {
 		if start < 0 {
 			start = 0
 		}
+	}
+
+	if len(m.items) == 0 {
+		leftLines = append(leftLines, clipStyle.Render("  "+faintStyle.Render("No source files found")))
 	}
 
 	for i := start; i < len(m.items) && i < start+paneHeight-4; i++ {
