@@ -142,12 +142,20 @@ func Scan(root string) (*ScanResult, error) {
 			return nil
 		}
 
-		ext := filepath.Ext(path)
-		if extsMap[ext] {
-			res.Files = append(res.Files, path)
-			if len(res.Files) > 50000 {
-				return ErrScanLimitExceeded
-			}
+		base := filepath.Base(path)
+		// Skip hidden metadata files (except common configs like .env)
+		if strings.HasPrefix(base, ".") && base != ".env" && base != ".env.example" && base != ".gitignore" {
+			return nil
+		}
+
+		ext := strings.ToLower(filepath.Ext(path))
+		if isBinaryExt(ext) {
+			return nil
+		}
+
+		res.Files = append(res.Files, path)
+		if len(res.Files) > 50000 {
+			return ErrScanLimitExceeded
 		}
 		return nil
 	})
@@ -269,11 +277,15 @@ func findCallee(f types.Fact, symbolsByName map[string][]types.Symbol) string {
 	var candidates []types.Symbol
 
 	for _, sym := range symbolsByName[f.CalleeName] {
-		if f.CalleeQualifier != "" && !strings.Contains(sym.ID, f.CalleeQualifier) {
-			continue
+		if f.CalleeQualifier != "" && strings.Contains(sym.ID, f.CalleeQualifier) {
+			candidates = append(candidates, sym)
 		}
+	}
 
-		candidates = append(candidates, sym)
+	// If no qualified match was found (e.g. method called on an instance variable like 's.Start()'),
+	// fall back to candidates matching the callee name
+	if len(candidates) == 0 {
+		candidates = append(candidates, symbolsByName[f.CalleeName]...)
 	}
 
 	if len(candidates) == 0 {
@@ -332,4 +344,16 @@ func promptYesNo(message string) bool {
 	}
 	text = strings.TrimSpace(strings.ToLower(text))
 	return text == "y" || text == "yes"
+}
+
+func isBinaryExt(ext string) bool {
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".pdf",
+		".zip", ".tar", ".gz", ".tgz", ".rar", ".7z",
+		".pyc", ".pyo", ".o", ".a", ".so", ".dylib", ".dll", ".exe",
+		".bin", ".class", ".wasm", ".db", ".sqlite", ".sqlite3",
+		".woff", ".woff2", ".ttf", ".eot", ".mp4", ".mp3", ".mov", ".avi":
+		return true
+	}
+	return false
 }

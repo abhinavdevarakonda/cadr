@@ -2,8 +2,10 @@ package golang
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
+	"github.com/abhinavdevarakonda/cadr/internal/lang/universal"
 	"github.com/abhinavdevarakonda/cadr/internal/types"
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/golang"
@@ -20,21 +22,27 @@ func (c *GoConfig) Grammar() *sitter.Language {
 }
 
 func (c *GoConfig) SymbolQuery() string {
-	return `
-	(
-		function_declaration
-			name: (identifier) @func.name
-	) @function
+	query, err := universal.LoadSymbolQuery("go")
+	if err != nil {
+		return `
+		(
+			function_declaration
+				name: (identifier) @func.name
+		) @function
 
-	(
-		method_declaration
-		name: (field_identifier) @func.name
-	) @function
-	`
+		(
+			method_declaration
+			name: (field_identifier) @func.name
+		) @function
+		`
+	}
+	return query
 }
 
 func (c *GoConfig) FactQuery() string {
-	return `
+	query, err := universal.LoadFactQuery("go")
+	if err != nil {
+		return `
 		(call_expression
 			function: (identifier) @call.name) @call
 
@@ -42,7 +50,9 @@ func (c *GoConfig) FactQuery() string {
 			function: (selector_expression
 				(identifier) @call.qualifier
 				(field_identifier) @call.name)) @call
-	`
+		`
+	}
+	return query
 }
 
 func (c *GoConfig) NodeToSymbol(node *sitter.Node, source []byte, path string) (*types.Symbol, error) {
@@ -74,7 +84,7 @@ func (c *GoConfig) extractFunction(node *sitter.Node, source []byte, path string
 		return nil, fmt.Errorf("function name not found")
 	}
 
-	packageName := extractPackageName(path)
+	packageName := extractPackageName(source, path)
 	id := fmt.Sprintf("%s.%s", packageName, funcName)
 
 	return &types.Symbol{
@@ -107,7 +117,7 @@ func (c *GoConfig) extractMethod(node *sitter.Node, source []byte, path string) 
 		return nil, fmt.Errorf("method name or receiver not found")
 	}
 
-	packageName := extractPackageName(path)
+	packageName := extractPackageName(source, path)
 	id := fmt.Sprintf("%s.%s.%s", packageName, receiverType, methodName)
 
 	return &types.Symbol{
@@ -161,12 +171,23 @@ func (c *GoConfig) NodeToFact(node *sitter.Node, source []byte, path string) (*t
 	}, nil
 }
 
-func extractPackageName(path string) string {
-	parts := strings.Split(path, "/")
-	for i := len(parts) - 1; i >= 0; i-- {
-		if parts[i] != "" && !strings.HasSuffix(parts[i], ".go") {
-			return parts[i]
+func extractPackageName(source []byte, path string) string {
+	lines := strings.Split(string(source), "\n")
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if strings.HasPrefix(trimmed, "package ") {
+			fields := strings.Fields(trimmed)
+			if len(fields) >= 2 {
+				pkg := strings.Trim(fields[1], ";")
+				if pkg != "" {
+					return pkg
+				}
+			}
 		}
+	}
+	dir := filepath.Base(filepath.Dir(path))
+	if dir != "" && dir != "." && dir != "/" {
+		return dir
 	}
 	return "main"
 }
@@ -183,7 +204,7 @@ func extractReceiverType(paramList *sitter.Node, source []byte) string {
 					for k := 0; k < int(typeNode.NamedChildCount()); k++ {
 						innerType := typeNode.NamedChild(k)
 						if innerType.Type() == "type_identifier" {
-							return "*" + innerType.Content(source)
+							return innerType.Content(source)
 						}
 					}
 				}

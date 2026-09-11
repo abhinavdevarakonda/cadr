@@ -37,3 +37,6 @@ npm-debug.log*
 # cadr runtime cache
 .cadr/
 cadr.yaml
+
+# crush dir
+.crush/

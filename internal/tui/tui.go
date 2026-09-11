@@ -868,6 +868,12 @@ func (m Model) View() string {
 			} else {
 				nameStyle = funcStyle
 			}
+		case graph.FileNode:
+			if isCodeFile(item.Name) {
+				nameStyle = textStyle
+			} else {
+				nameStyle = faintStyle
+			}
 		default:
 			nameStyle = textStyle
 		}
@@ -1006,6 +1012,24 @@ func (m Model) View() string {
 				}
 			}
 		}
+	} else if len(m.items) > 0 && m.items[m.selected].Type == graph.FileNode {
+		item := m.items[m.selected]
+		fullPath := filepath.Join(m.projectPath, item.Path)
+		info, err := os.Stat(fullPath)
+		sizeStr := ""
+		if err == nil {
+			sizeStr = formatFileSize(info.Size())
+		}
+		rightLines = append(rightLines, clipStyle.Render("  "+textStyle.Bold(true).Render(item.Name)))
+		rightLines = append(rightLines, clipStyle.Render("  "+faintStyle.Render(item.Path)))
+		if sizeStr != "" {
+			rightLines = append(rightLines, clipStyle.Render("  "+faintStyle.Render("Size: "+sizeStr)))
+		}
+		rightLines = append(rightLines, "")
+		if item.HasC {
+			rightLines = append(rightLines, clipStyle.Render("  "+faintStyle.Render("Press 'l' to expand functions")))
+		}
+		rightLines = append(rightLines, clipStyle.Render("  "+faintStyle.Render("Press 'Enter' to open in editor")))
 	}
 	if len(rightLines) > paneHeight {
 		rightLines = rightLines[:paneHeight]
@@ -1271,3 +1295,25 @@ func StartMonitor(g *graph.Graph, target string, projectRoot string) error {
 		return nil
 	}
 }
+
+func formatFileSize(b int64) string {
+	if b < 1024 {
+		return fmt.Sprintf("%d B", b)
+	} else if b < 1024*1024 {
+		return fmt.Sprintf("%.1f KB", float64(b)/1024.0)
+	}
+	return fmt.Sprintf("%.1f MB", float64(b)/(1024.0*1024.0))
+}
+
+func isCodeFile(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".py", ".go", ".js", ".jsx", ".ts", ".tsx", ".c", ".h",
+		".rs", ".java", ".rb", ".cpp", ".cc", ".cxx", ".hpp",
+		".cs", ".php", ".kt", ".swift", ".scala", ".m", ".dart",
+		".lua", ".zig", ".sh", ".bash", ".zsh":
+		return true
+	}
+	return false
+}
+
