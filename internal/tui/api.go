@@ -267,15 +267,15 @@ type APIConfig struct {
 
 // TUI model definition
 type APIModel struct {
-	endpoints            []frameworks.Endpoint
-	filtered             []frameworks.Endpoint
-	selectedIdx          int
-	activeSection        int // 0: Local/Discovered, 1: Global/External
-	externalEndpoints    []frameworks.Endpoint
-	filteredExternal     []frameworks.Endpoint
-	selectedExternalIdx  int
-	apiConfig            APIConfig
-	graph                *graph.Graph
+	endpoints           []frameworks.Endpoint
+	filtered            []frameworks.Endpoint
+	selectedIdx         int
+	activeSection       int // 0: Local/Discovered, 1: Global/External
+	externalEndpoints   []frameworks.Endpoint
+	filteredExternal    []frameworks.Endpoint
+	selectedExternalIdx int
+	apiConfig           APIConfig
+	graph               *graph.Graph
 
 	// ui screen state
 	screen               APIScreen
@@ -1896,8 +1896,22 @@ func openAPIEditor(loc *LocationToOpen) {
 	}
 }
 
+func deduplicateEndpoints(endpoints []frameworks.Endpoint) []frameworks.Endpoint {
+	seen := make(map[string]bool)
+	var unique []frameworks.Endpoint
+	for _, ep := range endpoints {
+		key := strings.ToUpper(ep.Method) + ":" + ep.Path
+		if !seen[key] {
+			seen[key] = true
+			unique = append(unique, ep)
+		}
+	}
+	return unique
+}
+
 // entry point
 func StartAPI(endpoints []frameworks.Endpoint, config APIConfig, g *graph.Graph, startGlobal bool) error {
+	endpoints = deduplicateEndpoints(endpoints)
 	extEndpoints := loadExternalEndpoints()
 	activeSec := 0
 	rTab := TabCallGraph

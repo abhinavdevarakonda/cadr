@@ -115,7 +115,7 @@ def _extract_path_params(path):
         params.append({"name": pname, "type": ptype})
     return params
 
-def _save_dynamic_endpoint(rule, view_func, methods):
+def _save_dynamic_endpoint(rule, view_func, methods, framework="flask"):
     try:
         os.makedirs(".cadr/cache", exist_ok=True)
         cache_path = ".cadr/cache/endpoints.json"
@@ -132,6 +132,8 @@ def _save_dynamic_endpoint(rule, view_func, methods):
         line = 0
         handler_name = ""
         if view_func:
+            while hasattr(view_func, "__wrapped__"):
+                view_func = view_func.__wrapped__
             if hasattr(view_func, "__code__"):
                 filename = os.path.abspath(view_func.__code__.co_filename)
                 if filename.startswith(_project_root):
@@ -147,6 +149,8 @@ def _save_dynamic_endpoint(rule, view_func, methods):
 
         for m in methods:
             m = m.upper()
+            if m in ("HEAD", "OPTIONS"):
+                continue
             exists = False
             for ep in endpoints:
                 if ep.get("path") == rule and ep.get("method") == m:
@@ -159,7 +163,7 @@ def _save_dynamic_endpoint(rule, view_func, methods):
                     "handler_func": handler_name,
                     "file": filename,
                     "line": line,
-                    "framework": "flask",
+                    "framework": framework,
                     "path_params": _extract_path_params(rule)
                 })
 
@@ -167,6 +171,92 @@ def _save_dynamic_endpoint(rule, view_func, methods):
             json.dump(endpoints, f, indent=2)
     except Exception as e:
         print(f"cadr: failed to save dynamic endpoint: {e}", file=sys.stderr)
+
+def _dump_fastapi_routes(app):
+    import re
+    routes_to_process = []
+
+    # Modern FastAPI (0.110+) has routing.iter_route_contexts
+    try:
+        from fastapi.routing import iter_route_contexts
+        for rc in iter_route_contexts(getattr(app, "routes", [])):
+            route = getattr(rc, "route", rc)
+            full_path = getattr(rc, "path", getattr(route, "path", None))
+            methods = getattr(route, "methods", None)
+            endpoint = getattr(route, "endpoint", None)
+            if full_path and endpoint:
+                routes_to_process.append((full_path, methods, endpoint))
+    except Exception:
+        pass
+
+    # Fallback for older FastAPI versions or Starlette: recursive traversal
+    if not routes_to_process:
+        def _recurse(routes, prefix=""):
+            for r in routes:
+                path = getattr(r, "path", None)
+                if hasattr(r, "routes"):
+                    new_prefix = (prefix.rstrip("/") + "/" + path.lstrip("/")) if path else prefix
+                    _recurse(r.routes, new_prefix)
+                elif path:
+                    full_path = (prefix.rstrip("/") + "/" + path.lstrip("/")) if prefix else path
+                    endpoint = getattr(r, "endpoint", None)
+                    if endpoint:
+                        routes_to_process.append((full_path, getattr(r, "methods", None), endpoint))
+        _recurse(getattr(app, "routes", []))
+
+    for path, methods, endpoint in routes_to_process:
+        rule = re.sub(
+            r'\{([a-zA-Z_]\w*)(?::([a-zA-Z_]\w*))?\}',
+            lambda m: f"<{m.group(2)}:{m.group(1)}>" if m.group(2) else f"<{m.group(1)}>",
+            path
+        )
+        _save_dynamic_endpoint(rule, endpoint, methods, framework="fastapi")
+
+_active_fastapi_apps = []
+
+def _patch_fastapi():
+    try:
+        import fastapi
+        import functools
+        import atexit
+
+        original_init = fastapi.FastAPI.__init__
+        def patched_init(self, *args, **kwargs):
+            res = original_init(self, *args, **kwargs)
+            _active_fastapi_apps.append(self)
+            return res
+        fastapi.FastAPI.__init__ = patched_init
+
+        original_call = fastapi.FastAPI.__call__
+        @functools.wraps(original_call)
+        async def patched_call(self, scope, receive, send):
+            if not getattr(self, "_cadr_routes_dumped", False):
+                self._cadr_routes_dumped = True
+                _dump_fastapi_routes(self)
+            return await original_call(self, scope, receive, send)
+        fastapi.FastAPI.__call__ = patched_call
+
+        original_include = fastapi.FastAPI.include_router
+        def patched_include(self, router, *args, **kwargs):
+            res = original_include(self, router, *args, **kwargs)
+            try:
+                _dump_fastapi_routes(self)
+            except Exception:
+                pass
+            return res
+        fastapi.FastAPI.include_router = patched_include
+
+        def _dump_on_exit():
+            for app in _active_fastapi_apps:
+                try:
+                    _dump_fastapi_routes(app)
+                except Exception:
+                    pass
+        atexit.register(_dump_on_exit)
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"cadr: failed to patch fastapi: {e}", file=sys.stderr)
 
 def _patch_flask():
     try:
@@ -176,7 +266,7 @@ def _patch_flask():
         original_app_add = flask.Flask.add_url_rule
         def patched_app_add(self, rule, endpoint=None, view_func=None, **options):
             methods = options.get("methods")
-            _save_dynamic_endpoint(rule, view_func, methods)
+            _save_dynamic_endpoint(rule, view_func, methods, framework="flask")
             return original_app_add(self, rule, endpoint, view_func, **options)
         flask.Flask.add_url_rule = patched_app_add
     except ImportError:
@@ -187,6 +277,7 @@ def _patch_flask():
 def start():
     """Initializes the background sender and globally attaches the cadr trace hook."""
     _patch_flask()
+    _patch_fastapi()
     
     # Start background sender unless we are explicitly doing a local synchronous trace
     if os.environ.get("CADR_LOCAL_ONLY") != "1":
