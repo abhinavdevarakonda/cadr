@@ -28,6 +28,7 @@ env/
 coverage.out
 *.test
 analyzer_test.go
+loop_app.py
 
 # Node
 node_modules/
