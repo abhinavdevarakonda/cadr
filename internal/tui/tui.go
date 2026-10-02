@@ -59,9 +59,9 @@ var (
 type Mode string
 
 const (
-	ModeImpact Mode = "impact"
-	ModeTrace  Mode = "trace"
-	ModeFlow   Mode = "flow"
+	ModePreview Mode = "preview"
+	ModeImpact  Mode = "impact"
+	ModeFlow    Mode = "flow"
 )
 
 type TraceEventMsg tracer.Event
@@ -76,6 +76,8 @@ type Model struct {
 	height        int
 	itemToOpen    *TreeItem
 	rightMode     Mode
+	impactCallees bool // false: callers, true: callees
+	previewScroll int
 	focus         int // 0: left, 1: right
 	rightItems    []analyzer.ImpactResult
 	rightSelected int
@@ -114,12 +116,13 @@ type TreeItem struct {
 
 func NewModel(g *graph.Graph, projectRoot string) Model {
 	m := Model{
-		graph:      g,
-		expanded:   make(map[string]bool),
-		rightMode:  ModeImpact,
-		isLive:     true,
-		followLive: true,
-		hitCounts:  make(map[string]int),
+		graph:         g,
+		expanded:      make(map[string]bool),
+		rightMode:     ModePreview,
+		impactCallees: false,
+		isLive:        true,
+		followLive:    true,
+		hitCounts:     make(map[string]int),
 	}
 
 	// Resolve the project name from the given root path
@@ -475,6 +478,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focus == 0 {
 				if m.selected < len(m.items)-1 {
 					m.selected++
+					m.previewScroll = 0
 				}
 			} else {
 				if m.rightMode == ModeFlow {
@@ -482,6 +486,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.playhead++
 						m.syncToHistory()
 					}
+				} else if m.rightMode == ModePreview {
+					m.previewScroll++
 				} else {
 					if m.rightSelected < len(m.rightItems)-1 {
 						m.rightSelected++
@@ -492,6 +498,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focus == 0 {
 				if m.selected > 0 {
 					m.selected--
+					m.previewScroll = 0
 				}
 			} else {
 				if m.rightMode == ModeFlow {
@@ -499,6 +506,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.playhead--
 						m.isLive = false
 						m.syncToHistory()
+					}
+				} else if m.rightMode == ModePreview {
+					if m.previewScroll > 0 {
+						m.previewScroll--
 					}
 				} else {
 					if m.rightSelected > 0 {
@@ -513,6 +524,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.selected >= len(m.items) {
 						m.selected = len(m.items) - 1
 					}
+					m.previewScroll = 0
 				}
 			} else {
 				if m.rightMode == ModeFlow {
@@ -523,6 +535,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 						m.syncToHistory()
 					}
+				} else if m.rightMode == ModePreview {
+					m.previewScroll += jump
 				} else {
 					m.rightSelected += jump
 					if m.rightSelected >= len(m.rightItems) {
@@ -536,6 +550,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.selected < 0 {
 					m.selected = 0
 				}
+				m.previewScroll = 0
 			} else {
 				if m.rightMode == ModeFlow {
 					if len(m.history) > 0 {
@@ -545,6 +560,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 						m.isLive = false
 						m.syncToHistory()
+					}
+				} else if m.rightMode == ModePreview {
+					m.previewScroll -= jump
+					if m.previewScroll < 0 {
+						m.previewScroll = 0
 					}
 				} else {
 					m.rightSelected -= jump
@@ -557,6 +577,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focus == 0 {
 				if len(m.items) > 0 {
 					m.selected = len(m.items) - 1
+					m.previewScroll = 0
 				}
 			} else {
 				m.playhead = len(m.history) - 1
@@ -589,6 +610,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.expanded = make(map[string]bool)
 				m.expanded["."] = true
 				m.selected = 0
+				m.previewScroll = 0
 			}
 			m.refreshTree()
 
@@ -605,6 +627,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					for i := m.selected - 1; i >= 0; i-- {
 						if m.items[i].Depth < item.Depth {
 							m.selected = i
+							m.previewScroll = 0
 							break
 						}
 					}
@@ -620,14 +643,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else {
 						if m.selected < len(m.items)-1 {
 							m.selected++
+							m.previewScroll = 0
 						}
 					}
-				} else if item.Type == graph.FunctionNode {
-					if (m.rightMode == ModeFlow && len(m.history) > 0) || (m.rightMode != ModeFlow && len(m.rightItems) > 0) {
-						m.focus = 1
-						if m.rightMode != ModeFlow {
-							m.rightSelected = 0
-						}
+				} else if item.Type == graph.FunctionNode || item.Type == graph.FileNode {
+					m.focus = 1
+					if m.rightMode == ModeImpact {
+						m.rightSelected = 0
 					}
 				}
 			}
@@ -640,13 +662,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "t", "tab":
 			switch m.rightMode {
-			case ModeImpact:
-				m.rightMode = ModeTrace
-			case ModeTrace:
-				m.rightMode = ModeFlow
-			default:
+			case ModePreview:
 				m.rightMode = ModeImpact
+			case ModeImpact:
+				m.rightMode = ModeFlow
+			case ModeFlow:
+				m.rightMode = ModePreview
+			default:
+				m.rightMode = ModePreview
 			}
+			m.rightSelected = 0
+			m.updateRightItems()
 		case "enter":
 			if m.focus == 0 {
 				if len(m.items) == 0 {
@@ -661,7 +687,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, tea.Quit
 				}
 			} else {
-				if m.rightMode == ModeFlow {
+				if m.rightMode == ModePreview {
+					if len(m.items) > 0 {
+						m.itemToOpen = &m.items[m.selected]
+						return m, tea.Quit
+					}
+				} else if m.rightMode == ModeFlow {
 					if len(m.history) > 0 && m.playhead < len(m.history) {
 						hit := m.history[m.playhead]
 
@@ -698,7 +729,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							ID:   n.ID,
 							Path: n.Path,
 						}
-						if m.rightMode == ModeImpact {
+						if !m.impactCallees {
 							m.itemToOpen.Line = res.Line // call site in caller's file
 						} else {
 							m.itemToOpen.Line = n.Line // callee's definition
@@ -708,7 +739,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case " ":
-			m.isLive = !m.isLive
+			if m.rightMode == ModeImpact {
+				m.impactCallees = !m.impactCallees
+				m.rightSelected = 0
+				m.updateRightItems()
+			} else if m.rightMode == ModeFlow {
+				m.isLive = !m.isLive
+			}
 		case "H":
 			if len(m.history) > 0 && m.playhead > 0 {
 				m.playhead--
@@ -745,18 +782,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Update rightItems based on selection
-	if len(m.items) > 0 {
-		selectedItem := m.items[m.selected]
-		if selectedItem.Type == graph.FunctionNode {
-			if m.rightMode == ModeImpact {
-				m.rightItems = analyzer.ImpactAnalysis(m.graph, selectedItem.ID)
-			} else {
-				m.rightItems = analyzer.TraceAnalysis(m.graph, selectedItem.ID)
-			}
-		} else {
-			m.rightItems = nil
-		}
-	}
+	m.updateRightItems()
 
 	return m, nil
 }
@@ -931,23 +957,46 @@ func (m Model) View() string {
 
 	// 3. Right pane
 	rightLines := make([]string, 0, paneHeight)
-	rightTitle := "Impact"
+
+	// Render tabs header
+	tabPreview := "Preview"
+	tabImpact := "Impact (Callers)"
+	if m.impactCallees {
+		tabImpact = "Impact (Callees)"
+	}
+	tabFlow := "Flow"
+
+	activeTabStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true)
+	inactiveTabStyle := faintStyle
+
+	var tPreview, tImpact, tFlow string
 	switch m.rightMode {
+	case ModePreview:
+		tPreview = activeTabStyle.Render(tabPreview) 
+		tImpact = inactiveTabStyle.Render(tabImpact)
+		tFlow = inactiveTabStyle.Render(tabFlow)
 	case ModeImpact:
-		rightTitle = "Impact (callers)"
-	case ModeTrace:
-		rightTitle = "Trace (callees)"
+		tPreview = inactiveTabStyle.Render(tabPreview)
+		tImpact = activeTabStyle.Render(tabImpact)
+		tFlow = inactiveTabStyle.Render(tabFlow)
 	case ModeFlow:
-		rightTitle = "Flow (sequence)"
+		tPreview = inactiveTabStyle.Render(tabPreview)
+		tImpact = inactiveTabStyle.Render(tabImpact)
+		tFlow = activeTabStyle.Render(tabFlow)
 	}
 
+	tabSep := faintStyle.Render(" │ ")
+	headerText := tPreview + tabSep + tImpact + tabSep + tFlow
 	if m.focus == 1 {
-		rightTitle = "> " + rightTitle
+		headerText = glowStyle.Render("● ") + headerText
 	}
-	rightLines = append(rightLines, headerStyle.Width(contentWidth).Render(rightTitle))
+	rightLines = append(rightLines, headerStyle.Width(contentWidth).Render(headerText))
 	rightLines = append(rightLines, "")
 
-	if m.rightMode == ModeFlow {
+	if m.rightMode == ModePreview {
+		previewLines := m.renderPreview(contentWidth, paneHeight-4)
+		rightLines = append(rightLines, previewLines...)
+	} else if m.rightMode == ModeFlow {
 		visibleCount := paneHeight - 4
 
 		// 1. Maintain camera tracking bounds
@@ -1012,24 +1061,13 @@ func (m Model) View() string {
 				}
 			}
 		}
-	} else if len(m.items) > 0 && m.items[m.selected].Type == graph.FileNode {
-		item := m.items[m.selected]
-		fullPath := filepath.Join(m.projectPath, item.Path)
-		info, err := os.Stat(fullPath)
-		sizeStr := ""
-		if err == nil {
-			sizeStr = formatFileSize(info.Size())
+	} else {
+		kindStr := "callers"
+		if m.impactCallees {
+			kindStr = "callees"
 		}
-		rightLines = append(rightLines, clipStyle.Render("  "+textStyle.Bold(true).Render(item.Name)))
-		rightLines = append(rightLines, clipStyle.Render("  "+faintStyle.Render(item.Path)))
-		if sizeStr != "" {
-			rightLines = append(rightLines, clipStyle.Render("  "+faintStyle.Render("Size: "+sizeStr)))
-		}
-		rightLines = append(rightLines, "")
-		if item.HasC {
-			rightLines = append(rightLines, clipStyle.Render("  "+faintStyle.Render("Press 'l' to expand functions")))
-		}
-		rightLines = append(rightLines, clipStyle.Render("  "+faintStyle.Render("Press 'Enter' to open in editor")))
+		rightLines = append(rightLines, clipStyle.Render("  "+faintStyle.Render(fmt.Sprintf("No %s found", kindStr))))
+		rightLines = append(rightLines, clipStyle.Render("  "+faintStyle.Render("Press 'Space' to toggle Callers / Callees")))
 	}
 	if len(rightLines) > paneHeight {
 		rightLines = rightLines[:paneHeight]
@@ -1047,10 +1085,14 @@ func (m Model) View() string {
 	sep := faintStyle.Render(" │ ")
 
 	// Left side: project info
-	modeName := "Impact"
+	modeName := "Preview"
 	switch m.rightMode {
-	case ModeTrace:
-		modeName = "Trace"
+	case ModeImpact:
+		if !m.impactCallees {
+			modeName = "Impact: Callers"
+		} else {
+			modeName = "Impact: Callees"
+		}
 	case ModeFlow:
 		modeName = "Flow"
 	}
@@ -1105,7 +1147,8 @@ func (m Model) View() string {
 			"  " + funcStyle.Render("h/l") + faintStyle.Render("         collapse/expand"),
 			"  " + funcStyle.Render("i") + faintStyle.Render("           toggle focus"),
 			"  " + funcStyle.Render("enter") + faintStyle.Render("       open in editor"),
-			"  " + funcStyle.Render("t") + faintStyle.Render("           cycle mode"),
+			"  " + funcStyle.Render("t / tab") + faintStyle.Render("     cycle mode (Preview/Impact/Flow)"),
+			"  " + funcStyle.Render("space") + faintStyle.Render("       toggle callers/callees or live"),
 			"  " + funcStyle.Render("/") + faintStyle.Render("           search"),
 			"  " + funcStyle.Render("c") + faintStyle.Render("           collapse/restore"),
 			"  " + funcStyle.Render("g g / G") + faintStyle.Render("     top / bottom"),
@@ -1113,7 +1156,6 @@ func (m Model) View() string {
 			headerStyle.Width(40).Render("Trace Controls"),
 			"",
 			"  " + funcStyle.Render("H/L") + faintStyle.Render("         scrub history"),
-			"  " + funcStyle.Render("space") + faintStyle.Render("       toggle live"),
 			"  " + funcStyle.Render("f") + faintStyle.Render("           follow mode"),
 			"",
 			faintStyle.Render("       press ? to close"),
@@ -1317,3 +1359,152 @@ func isCodeFile(name string) bool {
 	return false
 }
 
+func isBinaryExt(ext string) bool {
+	binaryExts := map[string]bool{
+		".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".ico": true,
+		".svg": true, ".webp": true, ".pdf": true, ".zip": true, ".tar": true,
+		".gz": true, ".exe": true, ".bin": true, ".dylib": true, ".so": true,
+		".woff": true, ".woff2": true, ".ttf": true, ".eot": true, ".mp4": true,
+		".mp3": true, ".lock": true,
+	}
+	return binaryExts[ext]
+}
+
+func (m *Model) updateRightItems() {
+	if len(m.items) > 0 {
+		selectedItem := m.items[m.selected]
+		if selectedItem.Type == graph.FunctionNode && m.rightMode == ModeImpact {
+			if !m.impactCallees {
+				m.rightItems = analyzer.ImpactAnalysis(m.graph, selectedItem.ID)
+			} else {
+				m.rightItems = analyzer.TraceAnalysis(m.graph, selectedItem.ID)
+			}
+		} else {
+			m.rightItems = nil
+		}
+	} else {
+		m.rightItems = nil
+	}
+}
+
+func (m *Model) renderPreview(contentWidth int, maxLines int) []string {
+	clipStyle := lipgloss.NewStyle().MaxWidth(contentWidth)
+	var lines []string
+	if len(m.items) == 0 {
+		return []string{"  " + faintStyle.Render("No items in project")}
+	}
+
+	item := m.items[m.selected]
+
+	resolvePath := func(p string) string {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+		candidate := filepath.Join(m.projectPath, p)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+		return p
+	}
+
+	if item.Type == graph.DirectoryNode {
+		lines = append(lines, clipStyle.Render("  "+dirStyle.Render("\uf07b "+item.Name)))
+		lines = append(lines, clipStyle.Render("  "+faintStyle.Render(item.Path)))
+		lines = append(lines, "")
+		lines = append(lines, clipStyle.Render("  "+faintStyle.Render("Press 'l' or 'Enter' to expand directory")))
+		return lines
+	}
+
+	if item.Type == graph.FileNode {
+		fullPath := resolvePath(item.Path)
+		fileInfo, err := os.Stat(fullPath)
+		sizeStr := ""
+		if err == nil {
+			sizeStr = formatFileSize(fileInfo.Size())
+		}
+
+		lines = append(lines, clipStyle.Render("  "+textStyle.Bold(true).Render(item.Name)+"  "+faintStyle.Render(sizeStr)))
+		lines = append(lines, clipStyle.Render("  "+faintStyle.Render(item.Path)))
+		lines = append(lines, "")
+
+		ext := strings.ToLower(filepath.Ext(item.Path))
+		if isBinaryExt(ext) {
+			lines = append(lines, clipStyle.Render("  "+faintStyle.Render("Binary file — preview not available")))
+			lines = append(lines, clipStyle.Render("  "+faintStyle.Render("Press 'Enter' to open in editor")))
+			return lines
+		}
+
+		rawBytes, err := os.ReadFile(fullPath)
+		if err != nil {
+			lines = append(lines, clipStyle.Render("  "+faintStyle.Render("Could not read file: "+err.Error())))
+			return lines
+		}
+
+		fileLines := strings.Split(string(rawBytes), "\n")
+		start := m.previewScroll
+		if start < 0 {
+			start = 0
+		}
+		if start >= len(fileLines) {
+			start = len(fileLines) - 1
+		}
+		if start < 0 {
+			start = 0
+		}
+
+		for i := start; i < len(fileLines) && len(lines) < maxLines; i++ {
+			lineNum := faintStyle.Render(fmt.Sprintf("%4d │ ", i+1))
+			content := textStyle.Render(fileLines[i])
+			lines = append(lines, clipStyle.Render(lineNum+content))
+		}
+		return lines
+	}
+
+	if item.Type == graph.FunctionNode {
+		n := m.graph.Nodes[item.ID]
+		if n == nil {
+			return []string{"  " + faintStyle.Render("Function node not found in graph")}
+		}
+
+		fullPath := resolvePath(n.Path)
+		lines = append(lines, clipStyle.Render("  "+funcStyle.Render("ƒ "+n.Name)+"  "+faintStyle.Render(fmt.Sprintf("%s:%d", filepath.Base(n.Path), n.Line))))
+		lines = append(lines, clipStyle.Render("  "+faintStyle.Render(n.Path)))
+		lines = append(lines, "")
+
+		rawBytes, err := os.ReadFile(fullPath)
+		if err != nil {
+			lines = append(lines, clipStyle.Render("  "+faintStyle.Render("Could not read file: "+err.Error())))
+			return lines
+		}
+
+		fileLines := strings.Split(string(rawBytes), "\n")
+		fnStart := n.Line - 1
+		fnEnd := n.EndLine
+		if fnStart < 0 {
+			fnStart = 0
+		}
+		if fnEnd <= 0 || fnEnd > len(fileLines) {
+			fnEnd = len(fileLines)
+		}
+
+		start := fnStart + m.previewScroll
+		if start < fnStart {
+			start = fnStart
+		}
+		if start >= fnEnd {
+			start = fnEnd - 1
+		}
+		if start < 0 {
+			start = 0
+		}
+
+		for i := start; i < fnEnd && len(lines) < maxLines; i++ {
+			lineNum := faintStyle.Render(fmt.Sprintf("%4d │ ", i+1))
+			content := textStyle.Render(fileLines[i])
+			lines = append(lines, clipStyle.Render(lineNum+content))
+		}
+		return lines
+	}
+
+	return lines
+}
