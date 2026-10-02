@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/abhinavdevarakonda/cadr/internal/analyzer"
+	"github.com/abhinavdevarakonda/cadr/internal/diff"
 	"github.com/abhinavdevarakonda/cadr/internal/graph"
 	"github.com/abhinavdevarakonda/cadr/internal/tracer"
 	tea "github.com/charmbracelet/bubbletea"
@@ -19,11 +20,12 @@ import (
 )
 
 var (
-	textStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("252"))
-	headerStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true).Border(lipgloss.NormalBorder(), false, false, true, false).BorderForeground(lipgloss.Color("240"))
-	faintStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	paneStyle     = lipgloss.NewStyle().Padding(1, 2)
+	textStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	selectedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("252"))
+	headerStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true).Border(lipgloss.NormalBorder(), false, false, true, false).BorderForeground(lipgloss.Color("240"))
+	faintStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	diffBadgeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // amber ~
+	paneStyle      = lipgloss.NewStyle().Padding(1, 2)
 
 	/* palette: jellybeans
 	dirStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("103"))            // blue
@@ -66,6 +68,7 @@ const (
 
 type TraceEventMsg tracer.Event
 type TraceBatchMsg []tracer.Event
+type DiffUpdatedMsg struct{}
 
 type Model struct {
 	graph         *graph.Graph
@@ -102,27 +105,47 @@ type Model struct {
 	languages   string
 	funcCount   int
 	projectPath string
+
+	// Diff tracking
+	projectRoot string
+	diffMgr     *diff.Manager
+	diffMap     map[string]*diff.FileDiff
 }
 
 type TreeItem struct {
-	ID    string // node ID
-	Name  string
-	Path  string
-	Line  int
-	Depth int
-	Type  graph.NodeType
-	HasC  bool // has children
+	ID        string // node ID
+	Name      string
+	Path      string
+	Line      int
+	Depth     int
+	Type      graph.NodeType
+	HasC      bool   // has children
+	HasDiff   bool   // has unacknowledged diff
+	DiffAge   string // e.g. "5m ago"
+	ShowBadge bool   // true if badge should be shown on this tree row (suppressed when expanded)
 }
 
 func NewModel(g *graph.Graph, projectRoot string) Model {
+	absRoot, err := filepath.Abs(projectRoot)
+	if err != nil {
+		absRoot = projectRoot
+	}
+
 	m := Model{
 		graph:         g,
+		projectRoot:   absRoot,
 		expanded:      make(map[string]bool),
 		rightMode:     ModePreview,
 		impactCallees: false,
 		isLive:        true,
 		followLive:    true,
 		hitCounts:     make(map[string]int),
+		diffMgr:       diff.NewManager(absRoot),
+		diffMap:       make(map[string]*diff.FileDiff),
+	}
+
+	if diffs, err := m.diffMgr.ScanAll(); err == nil {
+		m.diffMap = diffs
 	}
 
 	// Resolve the project name from the given root path
@@ -236,14 +259,65 @@ func (m *Model) refreshTree() {
 			name += string(filepath.Separator)
 		}
 
+		hasDiff := false
+		showBadge := false
+		diffAge := ""
+		relPath := filepath.Clean(n.Path)
+
+		if m.diffMap != nil {
+			switch n.Type {
+			case graph.FileNode:
+				if fd := m.diffMap[relPath]; fd != nil {
+					hasDiff = true
+					diffAge = diff.FormatRelativeTime(fd.ModTime)
+					if !m.expanded[n.ID] || !hasC {
+						showBadge = true
+					}
+				}
+			case graph.FunctionNode:
+				if fd := m.diffMap[relPath]; fd != nil {
+					if fd.FunctionHasDiff(n.Line, n.EndLine) {
+						hasDiff = true
+						showBadge = true
+						diffAge = diff.FormatRelativeTime(fd.ModTime)
+					}
+				}
+			case graph.DirectoryNode:
+				prefix := relPath
+				if prefix == "." {
+					prefix = ""
+				} else if !strings.HasSuffix(prefix, "/") {
+					prefix += "/"
+				}
+				var latest time.Time
+				for dRel, fd := range m.diffMap {
+					if prefix == "" || strings.HasPrefix(dRel, prefix) {
+						hasDiff = true
+						if fd.ModTime.After(latest) {
+							latest = fd.ModTime
+						}
+					}
+				}
+				if hasDiff {
+					diffAge = diff.FormatRelativeTime(latest)
+					if !m.expanded[n.ID] {
+						showBadge = true
+					}
+				}
+			}
+		}
+
 		items = append(items, TreeItem{
-			ID:    n.ID,
-			Name:  name,
-			Path:  n.Path,
-			Line:  n.Line,
-			Depth: depth,
-			Type:  n.Type,
-			HasC:  hasC,
+			ID:        n.ID,
+			Name:      name,
+			Path:      n.Path,
+			Line:      n.Line,
+			Depth:     depth,
+			Type:      n.Type,
+			HasC:      hasC,
+			HasDiff:   hasDiff,
+			DiffAge:   diffAge,
+			ShowBadge: showBadge,
 		})
 
 		if m.expanded[n.ID] {
@@ -673,6 +747,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.rightSelected = 0
 			m.updateRightItems()
+		case "a":
+			if len(m.items) > 0 && m.diffMgr != nil {
+				item := m.items[m.selected]
+				switch item.Type {
+				case graph.FunctionNode:
+					n := m.graph.Nodes[item.ID]
+					if n != nil {
+						_ = m.diffMgr.AcknowledgeFunction(n.Path, n.Line, n.EndLine)
+					}
+				case graph.FileNode:
+					_ = m.diffMgr.AcknowledgeFile(item.Path)
+				case graph.DirectoryNode:
+					_ = m.diffMgr.AcknowledgeDir(item.Path)
+				}
+				if diffs, err := m.diffMgr.ScanAll(); err == nil {
+					m.diffMap = diffs
+				}
+				m.previewScroll = 0
+				m.refreshTree()
+			}
+		case "A":
+			if m.diffMgr != nil {
+				_ = m.diffMgr.AcknowledgeAll()
+				if diffs, err := m.diffMgr.ScanAll(); err == nil {
+					m.diffMap = diffs
+				}
+				m.previewScroll = 0
+				m.refreshTree()
+			}
 		case "enter":
 			if m.focus == 0 {
 				if len(m.items) == 0 {
@@ -776,6 +879,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.syncToHistory()
 			}
 		}
+	case DiffUpdatedMsg:
+		if m.diffMgr != nil {
+			if diffs, err := m.diffMgr.ScanAll(); err == nil {
+				m.diffMap = diffs
+			}
+			m.refreshTree()
+		}
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -807,9 +918,14 @@ func (m Model) View() string {
 	}
 
 	halfWidth := m.width / 2
+	rightWidth := m.width - halfWidth
 	contentWidth := halfWidth - 4
 	if contentWidth < 10 {
 		contentWidth = 10
+	}
+	rightContentWidth := rightWidth - 4
+	if rightContentWidth < 10 {
+		rightContentWidth = 10
 	}
 	clipStyle := lipgloss.NewStyle().MaxWidth(contentWidth)
 
@@ -915,33 +1031,72 @@ func (m Model) View() string {
 			}
 		}
 
-		content := icon + item.Name
-		line := indentStr + content
+		plainLeft := indentStr + icon + item.Name
+		leftWidth := lipgloss.Width(plainLeft)
+		if leftWidth > contentWidth {
+			leftWidth = contentWidth
+		}
 
-		if isHit {
-			if i == m.selected && m.focus == 0 {
-				// Combined Highlight: Reverse color or thick mark
-				line = indentStr + glowStyle.Bold(true).Render("▶ "+content)
-			} else {
-				// The glowing active hit should be the boldest version of its heat color
-				baseColor := nameStyle.GetForeground()
-				if baseColor == lipgloss.Color("") {
-					baseColor = lipgloss.Color("220")
-				}
-				line = indentStr + lipgloss.NewStyle().Foreground(baseColor).Bold(true).Background(lipgloss.Color("235")).Render(icon+item.Name)
+		var line string
+		isSelected := (i == m.selected && m.focus == 0)
+
+		if item.ShowBadge {
+			age := item.DiffAge
+			if age == "" {
+				age = "changed"
 			}
-		} else if i == m.selected && m.focus == 0 {
-			// pad to pane width
-			padLen := contentWidth - lipgloss.Width(line)
+			badgePlain := age + " ~"
+			badgeWidth := lipgloss.Width(badgePlain)
+
+			// Space for dotted connector
+			avail := contentWidth - leftWidth - badgeWidth
+			if avail < 1 {
+				avail = 1
+			}
+
+			connector := strings.Repeat("·", avail)
+			if avail >= 2 {
+				connector = " " + strings.Repeat("·", avail-2) + " "
+			}
+
+			if isSelected {
+				// FULL SOLID WHITE BAR: unstyled text so background color is never canceled mid-line
+				row := plainLeft + connector + badgePlain
+				padLen := contentWidth - lipgloss.Width(row)
+				if padLen > 0 {
+					row += strings.Repeat(" ", padLen)
+				}
+				line = selectedStyle.Render(row)
+			} else {
+				styledLeft := indentStr + faintStyle.Render(icon) + nameStyle.Render(item.Name)
+				if isHit {
+					baseColor := nameStyle.GetForeground()
+					if baseColor == lipgloss.Color("") {
+						baseColor = lipgloss.Color("220")
+					}
+					styledLeft = indentStr + lipgloss.NewStyle().Foreground(baseColor).Bold(true).Background(lipgloss.Color("235")).Render(icon+item.Name)
+				}
+				styledConnector := faintStyle.Render(connector)
+				styledBadge := faintStyle.Render(age) + " " + diffBadgeStyle.Render("~")
+				line = styledLeft + styledConnector + styledBadge
+			}
+		} else {
+			padLen := contentWidth - leftWidth
 			if padLen < 0 {
 				padLen = 0
 			}
-			line = selectedStyle.Render(line + strings.Repeat(" ", padLen))
-		} else if i == m.selected {
-			// Just a highlight mark without full background if not focused
-			line = indentStr + faintStyle.Render(icon) + nameStyle.Underline(true).Render(item.Name)
-		} else {
-			line = indentStr + faintStyle.Render(icon) + nameStyle.Render(item.Name)
+
+			if isSelected {
+				// FULL SOLID WHITE BAR
+				row := plainLeft + strings.Repeat(" ", padLen)
+				line = selectedStyle.Render(row)
+			} else if i == m.selected {
+				line = indentStr + faintStyle.Render(icon) + nameStyle.Underline(true).Render(item.Name)
+			} else if isHit {
+				line = indentStr + glowStyle.Bold(true).Render("▶ "+icon+item.Name)
+			} else {
+				line = indentStr + faintStyle.Render(icon) + nameStyle.Render(item.Name)
+			}
 		}
 		leftLines = append(leftLines, clipStyle.Render(line))
 	}
@@ -953,7 +1108,7 @@ func (m Model) View() string {
 		leftLines = append(leftLines, "")
 	}
 	leftPaneStr := lipgloss.JoinVertical(lipgloss.Top, leftLines...)
-	leftPane := paneStyle.Width(halfWidth).Render(leftPaneStr)
+	leftPane := paneStyle.Width(halfWidth).MaxWidth(halfWidth).Render(leftPaneStr)
 
 	// 3. Right pane
 	rightLines := make([]string, 0, paneHeight)
@@ -990,11 +1145,11 @@ func (m Model) View() string {
 	if m.focus == 1 {
 		headerText = glowStyle.Render("● ") + headerText
 	}
-	rightLines = append(rightLines, headerStyle.Width(contentWidth).Render(headerText))
+	rightLines = append(rightLines, headerStyle.Width(rightContentWidth).Render(headerText))
 	rightLines = append(rightLines, "")
 
 	if m.rightMode == ModePreview {
-		previewLines := m.renderPreview(contentWidth, paneHeight-4)
+		previewLines := m.renderPreview(rightContentWidth, paneHeight-4)
 		rightLines = append(rightLines, previewLines...)
 	} else if m.rightMode == ModeFlow {
 		visibleCount := paneHeight - 4
@@ -1076,7 +1231,7 @@ func (m Model) View() string {
 		rightLines = append(rightLines, "")
 	}
 	rightPaneStr := lipgloss.JoinVertical(lipgloss.Top, rightLines...)
-	rightPane := paneStyle.Width(halfWidth).Render(rightPaneStr)
+	rightPane := paneStyle.Width(rightWidth).MaxWidth(rightWidth).Render(rightPaneStr)
 
 	// 4. Bottom Bar
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
@@ -1274,6 +1429,16 @@ func Start(g *graph.Graph, projectRoot string) error {
 		defer listener.Close()
 	}
 
+	// Live filesystem watcher for instant diff updates from external editors & AI agents
+	fileWatcher, _ := diff.StartWatcher(m.projectRoot, func() {
+		if prog != nil {
+			prog.Send(DiffUpdatedMsg{})
+		}
+	})
+	if fileWatcher != nil {
+		defer fileWatcher.Close()
+	}
+
 	for {
 		prog = tea.NewProgram(&m, tea.WithAltScreen())
 		finalModel, err := prog.Run()
@@ -1285,6 +1450,12 @@ func Start(g *graph.Graph, projectRoot string) error {
 			if m.itemToOpen != nil {
 				openEditor(m.itemToOpen)
 				m.itemToOpen = nil
+				if m.diffMgr != nil {
+					if diffs, err := m.diffMgr.ScanAll(); err == nil {
+						m.diffMap = diffs
+					}
+				}
+				m.refreshTree()
 				continue
 			}
 		}
@@ -1309,6 +1480,15 @@ func StartMonitor(g *graph.Graph, target string, projectRoot string) error {
 		os.Exit(1)
 	}
 	defer listener.Close()
+
+	monitorWatcher, _ := diff.StartWatcher(m.projectRoot, func() {
+		if prog != nil {
+			prog.Send(DiffUpdatedMsg{})
+		}
+	})
+	if monitorWatcher != nil {
+		defer monitorWatcher.Close()
+	}
 
 	// Optionally start the target
 	if target != "" {
@@ -1400,6 +1580,12 @@ func (m *Model) renderPreview(contentWidth int, maxLines int) []string {
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
+		if m.projectRoot != "" {
+			candidate := filepath.Join(m.projectRoot, p)
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate
+			}
+		}
 		candidate := filepath.Join(m.projectPath, p)
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate
@@ -1408,6 +1594,58 @@ func (m *Model) renderPreview(contentWidth int, maxLines int) []string {
 	}
 
 	if item.Type == graph.DirectoryNode {
+		if item.HasDiff {
+			lines = append(lines, clipStyle.Render("  "+dirStyle.Render("\uf07b "+item.Name)+"  "+diffBadgeStyle.Render("~ modified")+" "+faintStyle.Render("("+item.DiffAge+")")))
+			lines = append(lines, clipStyle.Render("  "+faintStyle.Render(item.Path)))
+			lines = append(lines, clipStyle.Render("  "+faintStyle.Render("Press 'a' to acknowledge directory | 'A' acknowledge all")))
+			lines = append(lines, "")
+			lines = append(lines, clipStyle.Render("  "+textStyle.Bold(true).Render("Changed files in this directory:")))
+
+			prefix := filepath.Clean(item.Path)
+			if prefix == "." {
+				prefix = ""
+			} else if !strings.HasSuffix(prefix, "/") {
+				prefix += "/"
+			}
+
+			count := 0
+			for dRel, fd := range m.diffMap {
+				if prefix == "" || strings.HasPrefix(dRel, prefix) {
+					count++
+					fileLine := fmt.Sprintf("  ~ %s (+%d -%d, %s)", dRel, fd.AddedCount, fd.DeletedCount, diff.FormatRelativeTime(fd.ModTime))
+					lines = append(lines, clipStyle.Render(diffBadgeStyle.Render(fileLine)))
+
+					for _, node := range m.graph.Nodes {
+						if node.Type == graph.FunctionNode && filepath.Clean(node.Path) == dRel {
+							if fd.FunctionHasDiff(node.Line, node.EndLine) {
+								fnAdded := 0
+								fnDeleted := 0
+								for _, l := range fd.Lines {
+									targetLine := l.NewLine
+									if l.Op == diff.OpDelete {
+										targetLine = l.DeletedNearLine
+									}
+									if targetLine >= node.Line && targetLine <= node.EndLine {
+										if l.Op == diff.OpInsert {
+											fnAdded++
+										} else if l.Op == diff.OpDelete {
+											fnDeleted++
+										}
+									}
+								}
+								fnStats := fmt.Sprintf("(+%d -%d) :%d", fnAdded, fnDeleted, node.Line)
+								lines = append(lines, clipStyle.Render("      "+funcStyle.Render("ƒ "+node.Name)+" "+faintStyle.Render(fnStats)))
+							}
+						}
+					}
+				}
+			}
+			if count == 0 {
+				lines = append(lines, clipStyle.Render("  "+faintStyle.Render("No active diffs")))
+			}
+			return lines
+		}
+
 		lines = append(lines, clipStyle.Render("  "+dirStyle.Render("\uf07b "+item.Name)))
 		lines = append(lines, clipStyle.Render("  "+faintStyle.Render(item.Path)))
 		lines = append(lines, "")
@@ -1416,14 +1654,48 @@ func (m *Model) renderPreview(contentWidth int, maxLines int) []string {
 	}
 
 	if item.Type == graph.FileNode {
-		fullPath := resolvePath(item.Path)
-		fileInfo, err := os.Stat(fullPath)
-		sizeStr := ""
-		if err == nil {
-			sizeStr = formatFileSize(fileInfo.Size())
+		relPath := filepath.Clean(item.Path)
+		fd := m.diffMap[relPath]
+
+		if item.HasDiff && fd != nil {
+			// DIFF VIEW FOR FILE
+			lines = append(lines, clipStyle.Render("  "+textStyle.Bold(true).Render(item.Name)+"  "+diffBadgeStyle.Render("~ modified")+" "+faintStyle.Render(fmt.Sprintf("(+%d -%d, %s)", fd.AddedCount, fd.DeletedCount, item.DiffAge))))
+			lines = append(lines, clipStyle.Render("  "+faintStyle.Render(item.Path)+"  "+faintStyle.Render("Press 'a' to acknowledge | 'A' acknowledge all")))
+			lines = append(lines, "")
+
+			start := m.previewScroll
+			if start < 0 {
+				start = 0
+			}
+			if start >= len(fd.Lines) {
+				start = len(fd.Lines) - 1
+			}
+			if start < 0 {
+				start = 0
+			}
+
+			for i := start; i < len(fd.Lines) && len(lines) < maxLines; i++ {
+				l := fd.Lines[i]
+				switch l.Op {
+				case diff.OpInsert:
+					lineNum := lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render(fmt.Sprintf("%4d │ + ", l.NewLine))
+					content := lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render(l.Text)
+					lines = append(lines, clipStyle.Render(lineNum+content))
+				case diff.OpDelete:
+					lineNum := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(fmt.Sprintf("%4s │ - ", "-"))
+					content := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(l.Text)
+					lines = append(lines, clipStyle.Render(lineNum+content))
+				default:
+					lineNum := faintStyle.Render(fmt.Sprintf("%4d │   ", l.NewLine))
+					content := textStyle.Render(l.Text)
+					lines = append(lines, clipStyle.Render(lineNum+content))
+				}
+			}
+			return lines
 		}
 
-		lines = append(lines, clipStyle.Render("  "+textStyle.Bold(true).Render(item.Name)+"  "+faintStyle.Render(sizeStr)))
+		fullPath := resolvePath(item.Path)
+		lines = append(lines, clipStyle.Render("  "+textStyle.Bold(true).Render(item.Name)))
 		lines = append(lines, clipStyle.Render("  "+faintStyle.Render(item.Path)))
 		lines = append(lines, "")
 
@@ -1453,9 +1725,15 @@ func (m *Model) renderPreview(contentWidth int, maxLines int) []string {
 		}
 
 		for i := start; i < len(fileLines) && len(lines) < maxLines; i++ {
+			rawLine := strings.TrimRight(fileLines[i], "\r")
+			rawLine = strings.ReplaceAll(rawLine, "\t", "    ")
+			maxW := contentWidth - 7
+			if maxW < 0 {
+				maxW = 0
+			}
+			clipped := lipgloss.NewStyle().MaxWidth(maxW).Render(rawLine)
 			lineNum := faintStyle.Render(fmt.Sprintf("%4d │ ", i+1))
-			content := textStyle.Render(fileLines[i])
-			lines = append(lines, clipStyle.Render(lineNum+content))
+			lines = append(lines, lineNum+textStyle.Render(clipped))
 		}
 		return lines
 	}
@@ -1464,6 +1742,64 @@ func (m *Model) renderPreview(contentWidth int, maxLines int) []string {
 		n := m.graph.Nodes[item.ID]
 		if n == nil {
 			return []string{"  " + faintStyle.Render("Function node not found in graph")}
+		}
+
+		relPath := filepath.Clean(n.Path)
+		fd := m.diffMap[relPath]
+
+		if item.HasDiff && fd != nil {
+			var fnDiffLines []diff.Line
+			fnAdded := 0
+			fnDeleted := 0
+			for _, l := range fd.Lines {
+				targetLine := l.NewLine
+				if l.Op == diff.OpDelete {
+					targetLine = l.DeletedNearLine
+				}
+				if targetLine >= n.Line && targetLine <= n.EndLine {
+					fnDiffLines = append(fnDiffLines, l)
+					if l.Op == diff.OpInsert {
+						fnAdded++
+					} else if l.Op == diff.OpDelete {
+						fnDeleted++
+					}
+				}
+			}
+
+			// DIFF VIEW FOR FUNCTION
+			lines = append(lines, clipStyle.Render("  "+funcStyle.Render("ƒ "+n.Name)+"  "+diffBadgeStyle.Render("~ modified")+" "+faintStyle.Render(fmt.Sprintf("(+%d -%d, %s)", fnAdded, fnDeleted, item.DiffAge))))
+			lines = append(lines, clipStyle.Render("  "+faintStyle.Render(fmt.Sprintf("%s:%d", filepath.Base(n.Path), n.Line))+"  "+faintStyle.Render("Press 'a' to acknowledge | 'A' acknowledge all")))
+			lines = append(lines, "")
+
+			start := m.previewScroll
+			if start < 0 {
+				start = 0
+			}
+			if start >= len(fnDiffLines) {
+				start = len(fnDiffLines) - 1
+			}
+			if start < 0 {
+				start = 0
+			}
+
+			for i := start; i < len(fnDiffLines) && len(lines) < maxLines; i++ {
+				l := fnDiffLines[i]
+				switch l.Op {
+				case diff.OpInsert:
+					lineNum := lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render(fmt.Sprintf("%4d │ + ", l.NewLine))
+					content := lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render(l.Text)
+					lines = append(lines, clipStyle.Render(lineNum+content))
+				case diff.OpDelete:
+					lineNum := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(fmt.Sprintf("%4s │ - ", "-"))
+					content := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(l.Text)
+					lines = append(lines, clipStyle.Render(lineNum+content))
+				default:
+					lineNum := faintStyle.Render(fmt.Sprintf("%4d │   ", l.NewLine))
+					content := textStyle.Render(l.Text)
+					lines = append(lines, clipStyle.Render(lineNum+content))
+				}
+			}
+			return lines
 		}
 
 		fullPath := resolvePath(n.Path)
@@ -1499,9 +1835,15 @@ func (m *Model) renderPreview(contentWidth int, maxLines int) []string {
 		}
 
 		for i := start; i < fnEnd && len(lines) < maxLines; i++ {
+			rawLine := strings.TrimRight(fileLines[i], "\r")
+			rawLine = strings.ReplaceAll(rawLine, "\t", "    ")
+			maxW := contentWidth - 7
+			if maxW < 0 {
+				maxW = 0
+			}
+			clipped := lipgloss.NewStyle().MaxWidth(maxW).Render(rawLine)
 			lineNum := faintStyle.Render(fmt.Sprintf("%4d │ ", i+1))
-			content := textStyle.Render(fileLines[i])
-			lines = append(lines, clipStyle.Render(lineNum+content))
+			lines = append(lines, lineNum+textStyle.Render(clipped))
 		}
 		return lines
 	}
