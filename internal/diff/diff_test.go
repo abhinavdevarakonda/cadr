@@ -206,4 +206,81 @@ func TestScanGitStatus(t *testing.T) {
 	if !diffs["hello.go"].FunctionHasDiff(3, 5) {
 		t.Errorf("expected Hello() to have diff")
 	}
+
+	// Test index.lock resilience: if .git/index.lock exists, ScanAll should preserve existing diffs
+	gitLock := filepath.Join(tmpDir, ".git", "index.lock")
+	if err := os.WriteFile(gitLock, []byte("lock"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(gitLock)
+
+	lockedDiffs, err := mgr.ScanAll()
+	if err != nil {
+		t.Fatalf("expected no error during index.lock, got: %v", err)
+	}
+	if len(lockedDiffs) != 1 || lockedDiffs["hello.go"] == nil {
+		t.Fatalf("expected diffs to be preserved when index.lock is active, got: %v", lockedDiffs)
+	}
+}
+
+func TestScanFileIgnoresDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	mgr := NewManager(tmpDir)
+	subDir := filepath.Join(tmpDir, "some_dir")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if fd := mgr.ScanFile("some_dir"); fd != nil {
+		t.Errorf("expected nil FileDiff for directory, got: %v", fd)
+	}
+}
+
+func TestWatcherGitignoreAndEphemeral(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create .gitignore ignoring "raw/" and "*.log"
+	gitIgnorePath := filepath.Join(tmpDir, ".gitignore")
+	if err := os.WriteFile(gitIgnorePath, []byte("raw/\n*.log\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create raw directory
+	rawDir := filepath.Join(tmpDir, "raw")
+	if err := os.MkdirAll(rawDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	var triggered int
+	watcher, err := StartWatcher(tmpDir, func() {
+		triggered++
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Close()
+
+	// Verify ignored path
+	if !watcher.isIgnored(filepath.Join(tmpDir, "raw", "data.json")) {
+		t.Errorf("expected raw/data.json to be ignored")
+	}
+	if !watcher.isIgnored(filepath.Join(tmpDir, "app.log")) {
+		t.Errorf("expected app.log to be ignored")
+	}
+	if watcher.isIgnored(filepath.Join(tmpDir, "main.go")) {
+		t.Errorf("expected main.go not to be ignored")
+	}
+
+	// Verify ephemeral files
+	if !isEphemeralFile(".main.go.swp") {
+		t.Errorf("expected .swp to be ephemeral")
+	}
+	if !isEphemeralFile("file.go.tmp") {
+		t.Errorf("expected .tmp to be ephemeral")
+	}
+	if !isEphemeralFile("file.go~") {
+		t.Errorf("expected ~ to be ephemeral")
+	}
+	if isEphemeralFile("main.go") {
+		t.Errorf("expected main.go not to be ephemeral")
+	}
 }

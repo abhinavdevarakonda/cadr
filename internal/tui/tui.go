@@ -291,6 +291,9 @@ func (m *Model) refreshTree() {
 				}
 				var latest time.Time
 				for dRel, fd := range m.diffMap {
+					if fd == nil {
+						continue
+					}
 					if prefix == "" || strings.HasPrefix(dRel, prefix) {
 						hasDiff = true
 						if fd.ModTime.After(latest) {
@@ -881,10 +884,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case DiffUpdatedMsg:
 		if m.diffMgr != nil {
-			if diffs, err := m.diffMgr.ScanAll(); err == nil {
-				m.diffMap = diffs
-			}
-			m.refreshTree()
+			func() {
+				defer func() {
+					_ = recover()
+				}()
+				if diffs, err := m.diffMgr.ScanAll(); err == nil {
+					m.diffMap = diffs
+				}
+				m.refreshTree()
+			}()
 		}
 		return m, nil
 	case tea.WindowSizeMsg:

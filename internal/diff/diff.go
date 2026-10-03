@@ -414,6 +414,9 @@ func (m *Manager) ScanFile(relPath string) *FileDiff {
 		m.mu.Unlock()
 		return nil
 	}
+	if info.IsDir() {
+		return nil
+	}
 
 	currentBytes, err := os.ReadFile(fullPath)
 	if err != nil {
@@ -450,6 +453,14 @@ func (m *Manager) ScanFile(relPath string) *FileDiff {
 
 // ScanAll scans git status and cached baselines to discover all changed files in projectRoot.
 func (m *Manager) ScanAll() (map[string]*FileDiff, error) {
+	// Check if git is currently locked by an active commit/stage operation
+	gitLockPath := filepath.Join(m.ProjectRoot, ".git", "index.lock")
+	if _, err := os.Stat(gitLockPath); err == nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		return m.fileDiffs, nil
+	}
+
 	changedSet := make(map[string]bool)
 
 	// 1. Files modified according to git status
@@ -469,6 +480,16 @@ func (m *Manager) ScanAll() (map[string]*FileDiff, error) {
 			if !strings.HasPrefix(path, ".cadr/") {
 				changedSet[path] = true
 			}
+		}
+	} else {
+		// If git status failed (e.g. temporary git index lock race), preserve existing diffs
+		m.mu.RLock()
+		hasExisting := len(m.fileDiffs) > 0
+		m.mu.RUnlock()
+		if hasExisting {
+			m.mu.RLock()
+			defer m.mu.RUnlock()
+			return m.fileDiffs, nil
 		}
 	}
 
