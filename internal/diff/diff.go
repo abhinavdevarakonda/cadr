@@ -241,6 +241,33 @@ func (m *Manager) BaselinePath(relPath string) string {
 	return filepath.Join(m.ProjectRoot, ".cadr", "cache", "diff_baseline", relPath)
 }
 
+// GitShowHead retrieves the content of relPath at HEAD.
+func (m *Manager) GitShowHead(relPath string) ([]byte, bool) {
+	cmd := exec.Command("git", "show", "HEAD:"+relPath)
+	cmd.Dir = m.ProjectRoot
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err == nil {
+		return stdout.Bytes(), true
+	}
+	return nil, false
+}
+
+func (m *Manager) removeBaseline(relPath string) {
+	baselinePath := m.BaselinePath(relPath)
+	_ = os.Remove(baselinePath)
+	// Clean up empty parent directories up to diff_baseline
+	baseDir := filepath.Join(m.ProjectRoot, ".cadr", "cache", "diff_baseline")
+	dir := filepath.Dir(baselinePath)
+	for dir != baseDir && strings.HasPrefix(dir, baseDir) {
+		if err := os.Remove(dir); err != nil {
+			break
+		}
+		dir = filepath.Dir(dir)
+	}
+}
+
 // GetBaseline retrieves the baseline content for a file.
 // Priority:
 // 1. .cadr/cache/diff_baseline/<relPath>
@@ -252,13 +279,8 @@ func (m *Manager) GetBaseline(relPath string) ([]byte, bool, error) {
 	}
 
 	// Fallback to git show HEAD:<relPath>
-	cmd := exec.Command("git", "show", "HEAD:"+relPath)
-	cmd.Dir = m.ProjectRoot
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err == nil {
-		return stdout.Bytes(), true, nil
+	if gitData, ok := m.GitShowHead(relPath); ok {
+		return gitData, true, nil
 	}
 
 	// No baseline found (e.g. untracked file)
@@ -271,7 +293,16 @@ func (m *Manager) AcknowledgeFile(relPath string) error {
 	content, err := os.ReadFile(fullPath)
 	if err != nil {
 		// File might have been deleted, remove baseline if exists
-		_ = os.Remove(m.BaselinePath(relPath))
+		m.removeBaseline(relPath)
+		m.mu.Lock()
+		delete(m.fileDiffs, relPath)
+		m.mu.Unlock()
+		return nil
+	}
+
+	// If the file already matches git HEAD, no custom baseline is needed
+	if gitBytes, ok := m.GitShowHead(relPath); ok && bytes.Equal(content, gitBytes) {
+		m.removeBaseline(relPath)
 		m.mu.Lock()
 		delete(m.fileDiffs, relPath)
 		m.mu.Unlock()
@@ -420,6 +451,15 @@ func (m *Manager) ScanFile(relPath string) *FileDiff {
 
 	currentBytes, err := os.ReadFile(fullPath)
 	if err != nil {
+		return nil
+	}
+
+	// If the file matches git HEAD, it is clean in git; prune any stale cached baseline
+	if gitBytes, ok := m.GitShowHead(relPath); ok && bytes.Equal(currentBytes, gitBytes) {
+		m.removeBaseline(relPath)
+		m.mu.Lock()
+		delete(m.fileDiffs, relPath)
+		m.mu.Unlock()
 		return nil
 	}
 

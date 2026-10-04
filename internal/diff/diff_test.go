@@ -284,3 +284,65 @@ func TestWatcherGitignoreAndEphemeral(t *testing.T) {
 		t.Errorf("expected main.go not to be ephemeral")
 	}
 }
+
+func TestPruneCachedBaselineOnCommit(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Init git repo in tmpDir
+	cmd := exec.Command("git", "init")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Skip("git not available")
+	}
+	_ = exec.Command("git", "-C", tmpDir, "config", "user.email", "test@test.com").Run()
+	_ = exec.Command("git", "-C", tmpDir, "config", "user.name", "Test").Run()
+
+	filePath := filepath.Join(tmpDir, "file.go")
+	if err := os.WriteFile(filePath, []byte("package main\n\nfunc V1() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_ = exec.Command("git", "-C", tmpDir, "add", "file.go").Run()
+	_ = exec.Command("git", "-C", tmpDir, "commit", "-m", "v1").Run()
+
+	mgr := NewManager(tmpDir)
+
+	// Modify file
+	if err := os.WriteFile(filePath, []byte("package main\n\nfunc V1() {}\nfunc V2() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify diff exists before acknowledge
+	if fd := mgr.ScanFile("file.go"); fd == nil {
+		t.Fatal("expected diff before acknowledge, got nil")
+	}
+
+	// Acknowledge the file
+	if err := mgr.AcknowledgeFile("file.go"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Baseline should exist on disk while uncommitted
+	baselineFile := mgr.BaselinePath("file.go")
+	if _, err := os.Stat(baselineFile); err != nil {
+		t.Fatalf("expected baseline file to exist in cache, got err: %v", err)
+	}
+
+	// Scanning should show no diff now
+	if fd := mgr.ScanFile("file.go"); fd != nil {
+		t.Fatalf("expected nil diff after acknowledge, got: %+v", fd)
+	}
+
+	// Now commit the file in git
+	_ = exec.Command("git", "-C", tmpDir, "add", "file.go").Run()
+	_ = exec.Command("git", "-C", tmpDir, "commit", "-m", "v2").Run()
+
+	// Scan again: should prune the baseline from cache since it matches git HEAD
+	if fd := mgr.ScanFile("file.go"); fd != nil {
+		t.Fatalf("expected nil diff after commit, got: %+v", fd)
+	}
+
+	// Verify baseline file was pruned
+	if _, err := os.Stat(baselineFile); !os.IsNotExist(err) {
+		t.Errorf("expected baseline file to be pruned after commit, but it still exists")
+	}
+}
