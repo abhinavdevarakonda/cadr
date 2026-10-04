@@ -35,6 +35,10 @@ func runAPICmd(path string, globalMode bool) {
 				if err == nil {
 					endpoints = append(endpoints, fastapiEps...)
 				}
+				ginEps, err := frameworks.DetectGinEndpoints(scan.Files)
+				if err == nil {
+					endpoints = append(endpoints, ginEps...)
+				}
 			}
 		}
 
@@ -67,10 +71,17 @@ func loadDynamicEndpoints(root string) ([]frameworks.Endpoint, error) {
 }
 
 func loadAPIConfig(root string) tui.APIConfig {
+	port := os.Getenv("PORT")
+	defaultGinURL := "http://localhost:8080"
+	if port != "" {
+		defaultGinURL = "http://localhost:" + port
+	}
+
 	cfg := tui.APIConfig{
 		DefaultURL: "http://localhost:5000",
 		FlaskURL:   "http://localhost:5000",
 		FastAPIURL: "http://localhost:8081",
+		GinURL:     defaultGinURL,
 	}
 
 	cfgPath := filepath.Join(root, ".cadr", "config.yaml")
@@ -105,12 +116,15 @@ func loadAPIConfig(root string) tui.APIConfig {
 			cfg.FlaskURL = val
 		case "fastapi_api_url":
 			cfg.FastAPIURL = val
+		case "gin_api_url":
+			cfg.GinURL = val
 		}
 	}
 
 	if hasGlobal {
 		cfg.FlaskURL = cfg.DefaultURL
 		cfg.FastAPIURL = cfg.DefaultURL
+		cfg.GinURL = cfg.DefaultURL
 	}
 
 	return cfg

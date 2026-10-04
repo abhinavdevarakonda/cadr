@@ -79,6 +79,26 @@ func cleanPathParams(path string) string {
 	return re.ReplaceAllString(path, "<$2>")
 }
 
+func substitutePathParams(path string, params []frameworks.PathParam, values []string) string {
+	res := path
+	for i, p := range params {
+		val := ""
+		if i < len(values) {
+			val = strings.TrimSpace(values[i])
+		}
+		if val == "" {
+			continue
+		}
+		rawPlaceholder := fmt.Sprintf("<%s:%s>", p.Type, p.Name)
+		res = strings.ReplaceAll(res, rawPlaceholder, val)
+		res = strings.ReplaceAll(res, fmt.Sprintf("<%s>", p.Name), val)
+		res = strings.ReplaceAll(res, ":"+p.Name, val)
+		res = strings.ReplaceAll(res, "*"+p.Name, val)
+		res = strings.ReplaceAll(res, "{"+p.Name+"}", val)
+	}
+	return res
+}
+
 // request persistence cache
 type SavedRequest struct {
 	PathParams  []string `json:"path_params"`
@@ -263,6 +283,7 @@ type APIConfig struct {
 	DefaultURL string
 	FlaskURL   string
 	FastAPIURL string
+	GinURL     string
 }
 
 // TUI model definition
@@ -461,6 +482,8 @@ func (m *APIModel) resolveTargetURL(ep frameworks.Endpoint) string {
 		return m.apiConfig.FlaskURL
 	} else if ep.Framework == "fastapi" {
 		return m.apiConfig.FastAPIURL
+	} else if ep.Framework == "gin" {
+		return m.apiConfig.GinURL
 	}
 	return m.apiConfig.DefaultURL
 }
@@ -480,17 +503,11 @@ func (m *APIModel) getCurrentEndpoint() frameworks.Endpoint {
 
 func (m *APIModel) getFinalURL() string {
 	ep := m.getCurrentEndpoint()
-	path := ep.Path
-
-	for i, p := range ep.PathParams {
-		val := m.pathInputs[i].Value()
-		if val == "" {
-			val = fmt.Sprintf("<%s>", p.Name)
-		}
-		rawPlaceholder := fmt.Sprintf("<%s:%s>", p.Type, p.Name)
-		path = strings.ReplaceAll(path, rawPlaceholder, val)
-		path = strings.ReplaceAll(path, fmt.Sprintf("<%s>", p.Name), val)
+	var vals []string
+	for _, ti := range m.pathInputs {
+		vals = append(vals, ti.Value())
 	}
+	path := substitutePathParams(ep.Path, ep.PathParams, vals)
 
 	var urlStr string
 	if ep.Framework == "external" {
@@ -500,8 +517,13 @@ func (m *APIModel) getFinalURL() string {
 		urlStr = joinPath(target, path)
 	}
 
-	if m.queryInput.Value() != "" {
-		urlStr += "?" + m.queryInput.Value()
+	qVal := strings.TrimSpace(m.queryInput.Value())
+	if qVal != "" {
+		if strings.HasPrefix(qVal, "?") {
+			urlStr += qVal
+		} else {
+			urlStr += "?" + qVal
+		}
 	}
 	return urlStr
 }
@@ -817,19 +839,7 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					}
 
-					path := ep.Path
-					for i, p := range ep.PathParams {
-						val := ""
-						if i < len(saved.PathParams) {
-							val = saved.PathParams[i]
-						}
-						if val == "" {
-							val = fmt.Sprintf("<%s>", p.Name)
-						}
-						rawPlaceholder := fmt.Sprintf("<%s:%s>", p.Type, p.Name)
-						path = strings.ReplaceAll(path, rawPlaceholder, val)
-						path = strings.ReplaceAll(path, fmt.Sprintf("<%s>", p.Name), val)
-					}
+					path := substitutePathParams(ep.Path, ep.PathParams, saved.PathParams)
 
 					var urlStr string
 					if ep.Framework == "external" {
@@ -1764,28 +1774,108 @@ type CallTreeNode struct {
 }
 
 func findFunctionNode(g *graph.Graph, ep frameworks.Endpoint) *graph.Node {
-	if g == nil {
+	if g == nil || ep.HandlerFunc == "" {
 		return nil
 	}
-	var best *graph.Node
-	bestDist := 999999
+
+	// 1. Direct ID match (e.g. n.ID == "handlers.JoinQueue")
+	if n, ok := g.Nodes[ep.HandlerFunc]; ok && n.Type == graph.FunctionNode {
+		return n
+	}
+	for _, n := range g.Nodes {
+		if n.Type != graph.FunctionNode {
+			continue
+		}
+		if n.ID == ep.HandlerFunc {
+			return n
+		}
+	}
+
+	// 2. If handler is qualified like "handlers.JoinQueue"
+	if strings.Contains(ep.HandlerFunc, ".") {
+		parts := strings.Split(ep.HandlerFunc, ".")
+		targetFunc := parts[len(parts)-1]
+		qualifier := parts[len(parts)-2]
+
+		var qualifiedCandidates []*graph.Node
+		for _, n := range g.Nodes {
+			if n.Type != graph.FunctionNode {
+				continue
+			}
+			if n.Name == targetFunc {
+				// Check if ID contains qualifier or path contains qualifier directory
+				slashPath := filepath.ToSlash(n.Path)
+				if strings.Contains(n.ID, qualifier) || strings.Contains(slashPath, "/"+qualifier+"/") || strings.HasPrefix(slashPath, qualifier+"/") {
+					qualifiedCandidates = append(qualifiedCandidates, n)
+				}
+			}
+		}
+		if len(qualifiedCandidates) == 1 {
+			return qualifiedCandidates[0]
+		}
+		if len(qualifiedCandidates) > 1 {
+			for _, n := range qualifiedCandidates {
+				if filepath.Base(filepath.Dir(n.Path)) == qualifier {
+					return n
+				}
+			}
+			return qualifiedCandidates[0]
+		}
+	}
+
+	// 3. Match in the same file (e.g. Python decorator or local Go function)
+	var fileCandidates []*graph.Node
+	targetName := ep.HandlerFunc
+	if idx := strings.LastIndex(targetName, "."); idx != -1 {
+		targetName = targetName[idx+1:]
+	}
 
 	for _, n := range g.Nodes {
 		if n.Type != graph.FunctionNode {
 			continue
 		}
-		// match file name and function name
-		if strings.HasSuffix(n.Path, ep.File) || strings.HasSuffix(ep.File, n.Path) {
-			if n.Name == ep.HandlerFunc {
-				dist := n.Line - ep.Line
-				if dist >= 0 && dist < bestDist {
-					best = n
-					bestDist = dist
-				}
-			}
+		if (strings.HasSuffix(n.Path, ep.File) || strings.HasSuffix(ep.File, n.Path)) && n.Name == targetName {
+			fileCandidates = append(fileCandidates, n)
 		}
 	}
-	return best
+	if len(fileCandidates) > 0 {
+		var best *graph.Node
+		bestDist := 999999
+		for _, n := range fileCandidates {
+			dist := n.Line - ep.Line
+			if dist >= 0 && dist < bestDist {
+				best = n
+				bestDist = dist
+			}
+		}
+		if best != nil {
+			return best
+		}
+		return fileCandidates[0]
+	}
+
+	// 4. Match in the same directory (same package across multiple files)
+	epDir := filepath.Dir(ep.File)
+	for _, n := range g.Nodes {
+		if n.Type != graph.FunctionNode {
+			continue
+		}
+		if filepath.Dir(n.Path) == epDir && n.Name == targetName {
+			return n
+		}
+	}
+
+	// 5. Global fallback by function name
+	for _, n := range g.Nodes {
+		if n.Type != graph.FunctionNode {
+			continue
+		}
+		if n.Name == targetName {
+			return n
+		}
+	}
+
+	return nil
 }
 
 func buildCallTree(g *graph.Graph, nodeID string, depth int, maxDepth int, visited map[string]bool) *CallTreeNode {
