@@ -41,3 +41,6 @@ cadr.yaml
 
 # crush dir
 .crush/
+
+# agents
+.agents/

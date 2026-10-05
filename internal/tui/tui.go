@@ -19,13 +19,19 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// brightYellow is the highlight colour shared by the active-function marker and
+// the diff/language accents.
+const brightYellow = lipgloss.Color("3")
+
 var (
 	textStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	selectedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("252"))
 	headerStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true).Border(lipgloss.NormalBorder(), false, false, true, false).BorderForeground(lipgloss.Color("240"))
 	faintStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	diffBadgeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // amber ~
+	diffBadgeStyle = lipgloss.NewStyle().Foreground(brightYellow)
 	paneStyle      = lipgloss.NewStyle().Padding(1, 2)
+	dirIconStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#A1A578")) // sage white folder icons
+	fileIconStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#AFB3A7")) // light file icons
 
 	/* palette: jellybeans
 	dirStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("103"))            // blue
@@ -34,9 +40,9 @@ var (
 	*/
 
 	// adaptive (follows your terminal theme exactly)
-	dirStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))            // blue
-	funcStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))            // green
-	glowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true) // yellow
+	dirStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))     // blue
+	funcStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))     // green
+	glowStyle = lipgloss.NewStyle().Foreground(brightYellow).Bold(true) // yellow
 
 	// heatmap styles
 	heatLow     = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))  // Soft Green
@@ -1028,6 +1034,15 @@ func (m Model) View() string {
 			nameStyle = textStyle
 		}
 
+		// Folder and file icons use brighter accents; other rows stay faint.
+		iconStyle := faintStyle
+		switch item.Type {
+		case graph.DirectoryNode:
+			iconStyle = dirIconStyle
+		case graph.FileNode:
+			iconStyle = fileIconStyle
+		}
+
 		// YELLOW GLOW: Is this the current hit?
 		isHit := false
 		if len(m.history) > 0 && m.playhead < len(m.history) {
@@ -1076,7 +1091,7 @@ func (m Model) View() string {
 				}
 				line = selectedStyle.Render(row)
 			} else {
-				styledLeft := indentStr + faintStyle.Render(icon) + nameStyle.Render(item.Name)
+				styledLeft := indentStr + iconStyle.Render(icon) + nameStyle.Render(item.Name)
 				if isHit {
 					baseColor := nameStyle.GetForeground()
 					if baseColor == lipgloss.Color("") {
@@ -1099,11 +1114,11 @@ func (m Model) View() string {
 				row := plainLeft + strings.Repeat(" ", padLen)
 				line = selectedStyle.Render(row)
 			} else if i == m.selected {
-				line = indentStr + faintStyle.Render(icon) + nameStyle.Underline(true).Render(item.Name)
+				line = indentStr + iconStyle.Render(icon) + nameStyle.Underline(true).Render(item.Name)
 			} else if isHit {
 				line = indentStr + glowStyle.Bold(true).Render("▶ "+icon+item.Name)
 			} else {
-				line = indentStr + faintStyle.Render(icon) + nameStyle.Render(item.Name)
+				line = indentStr + iconStyle.Render(icon) + nameStyle.Render(item.Name)
 			}
 		}
 		leftLines = append(leftLines, clipStyle.Render(line))
@@ -1121,35 +1136,22 @@ func (m Model) View() string {
 	// 3. Right pane
 	rightLines := make([]string, 0, paneHeight)
 
-	// Render tabs header
-	tabPreview := "Preview"
-	tabImpact := "Impact (Callers)"
-	if m.impactCallees {
-		tabImpact = "Impact (Callees)"
+	// Render active tab header. Only the current mode is shown so narrow
+	// terminals don't wrap the tab list onto a second line.
+	tabName := "Preview"
+	switch m.rightMode {
+	case ModeImpact:
+		if m.impactCallees {
+			tabName = "Impact (Callees)"
+		} else {
+			tabName = "Impact (Callers)"
+		}
+	case ModeFlow:
+		tabName = "Flow"
 	}
-	tabFlow := "Flow"
 
 	activeTabStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true)
-	inactiveTabStyle := faintStyle
-
-	var tPreview, tImpact, tFlow string
-	switch m.rightMode {
-	case ModePreview:
-		tPreview = activeTabStyle.Render(tabPreview) 
-		tImpact = inactiveTabStyle.Render(tabImpact)
-		tFlow = inactiveTabStyle.Render(tabFlow)
-	case ModeImpact:
-		tPreview = inactiveTabStyle.Render(tabPreview)
-		tImpact = activeTabStyle.Render(tabImpact)
-		tFlow = inactiveTabStyle.Render(tabFlow)
-	case ModeFlow:
-		tPreview = inactiveTabStyle.Render(tabPreview)
-		tImpact = inactiveTabStyle.Render(tabImpact)
-		tFlow = activeTabStyle.Render(tabFlow)
-	}
-
-	tabSep := faintStyle.Render(" │ ")
-	headerText := tPreview + tabSep + tImpact + tabSep + tFlow
+	headerText := activeTabStyle.Render(tabName)
 	if m.focus == 1 {
 		headerText = glowStyle.Render("● ") + headerText
 	}
@@ -1252,15 +1254,15 @@ func (m Model) View() string {
 	switch m.rightMode {
 	case ModeImpact:
 		if !m.impactCallees {
-			modeName = "Impact: Callers"
+			modeName = "Callers"
 		} else {
-			modeName = "Impact: Callees"
+			modeName = "Callees"
 		}
 	case ModeFlow:
 		modeName = "Flow"
 	}
 	statusLeft := " " + textStyle.Render(m.projectPath) + sep +
-		lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(m.languages)
+		lipgloss.NewStyle().Foreground(brightYellow).Render(m.languages)
 
 	if m.width >= 70 {
 		statusLeft += sep + faintStyle.Render(fmt.Sprintf("%d functions", m.funcCount))

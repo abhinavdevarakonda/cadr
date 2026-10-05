@@ -19,6 +19,7 @@ import (
 	_ "github.com/abhinavdevarakonda/cadr/internal/lang/javascript"
 	_ "github.com/abhinavdevarakonda/cadr/internal/lang/python"
 	"github.com/abhinavdevarakonda/cadr/internal/server"
+	"github.com/abhinavdevarakonda/cadr/internal/toolwrap"
 	"github.com/abhinavdevarakonda/cadr/internal/tracer"
 	"github.com/abhinavdevarakonda/cadr/internal/tui"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -27,6 +28,12 @@ import (
 var _ = agents.DetectLanguage // reference to avoid unused import
 
 func main() {
+	// Hidden -toolexec entry point: `cadr tool-wrap <tool> [args...]`. This must
+	// run before flag stripping so wrapper arguments are never reinterpreted.
+	if len(os.Args) > 1 && os.Args[1] == "tool-wrap" {
+		os.Exit(toolwrap.Run(os.Args[2:]))
+	}
+
 	// Parse and strip global flags (-y, --yes, --tcp)
 	var cleanArgs []string
 	for i := 0; i < len(os.Args); i++ {
@@ -86,6 +93,7 @@ func main() {
 		"serve": true, "mcp": true, "run": true, "rec": true,
 		"api":     true,
 		"version": true, "--version": true, "-v": true,
+		"tool-wrap": true,
 	}
 	if !knownCommands[command] {
 		result := analyzer.Analyze(command)

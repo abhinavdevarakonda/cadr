@@ -129,6 +129,10 @@ func runCmd(fullCmd string, langOverride string, localOnly bool, onEvent func(Ev
 		return fmt.Errorf("unsupported language for command: %s", fullCmd)
 	}
 
+	if lang == "go" {
+		return runGoCmd(fullCmd, localOnly, onEvent)
+	}
+
 	agent, ok := agents.Get(lang)
 	if !ok {
 		return fmt.Errorf("no agent registered for language: %s", lang)
