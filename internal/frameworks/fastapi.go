@@ -246,7 +246,7 @@ func getFastAPIMountPrefixes(files []string) map[string]string {
 				continue
 			}
 			impMatch := importRegex.FindStringSubmatch(content)
-			
+
 			var modName string
 			if len(impMatch) >= 2 {
 				if impMatch[1] != "" {

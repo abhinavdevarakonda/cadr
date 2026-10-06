@@ -204,4 +204,3 @@ func main() {
 		t.Errorf("missing POST /api/v2/profile")
 	}
 }
-

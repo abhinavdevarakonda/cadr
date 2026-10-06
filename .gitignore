@@ -44,3 +44,4 @@ cadr.yaml
 
 # agents
 .agents/
+.pi/
