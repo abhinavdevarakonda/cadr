@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
+	"syscall"
 
 	"github.com/abhinavdevarakonda/cadr/internal/agents"
 	"github.com/abhinavdevarakonda/cadr/internal/analyzer"
@@ -92,6 +94,7 @@ func main() {
 		"analyze": true, "impact": true, "export": true,
 		"serve": true, "mcp": true, "run": true, "rec": true,
 		"api":     true,
+		"trace":   true,
 		"version": true, "--version": true, "-v": true,
 		"tool-wrap": true,
 	}
@@ -290,20 +293,25 @@ func main() {
 			return
 		}
 
-		// Ensure .cadr/traces directory exists
-		if err := os.MkdirAll(filepath.Join(".cadr", "traces"), 0755); err != nil {
-			fmt.Printf("Error creating .cadr/traces dir: %v\n", err)
-			os.Exit(1)
+		lang := langOverride
+		if lang == "" {
+			lang = agents.DetectLanguage(cmdStr)
 		}
-
-		outFile, err := os.Create(filepath.Join(".cadr", "traces", "last_run.jsonl"))
+		store := tracer.NewRunStore(".")
+		rw, err := store.Create(cmdStr, lang, toolwrap.TraceModeFromEnv())
 		if err != nil {
-			fmt.Printf("Error creating record file: %v\n", err)
+			fmt.Printf("Error creating run: %v\n", err)
 			os.Exit(1)
 		}
-		defer outFile.Close()
-		writer := bufio.NewWriter(outFile)
-		var mu sync.Mutex
+		// Finalize the run (write the manifest + summary) even when the user
+		// interrupts a long-running server with Ctrl-C.
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			<-sigCh
+			_ = rw.Close(130)
+			os.Exit(130)
+		}()
 
 		// Start listener so the agent can connect (UDS or TCP according to config)
 		cfg := tracer.LoadConfig(".")
@@ -328,23 +336,37 @@ func main() {
 				go func(c net.Conn) {
 					defer c.Close()
 					scanner := bufio.NewScanner(c)
+					scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 					for scanner.Scan() {
-						mu.Lock()
-						_, _ = writer.WriteString(scanner.Text() + "\n")
-						_ = writer.Flush()
-						mu.Unlock()
+						_ = rw.WriteLine(scanner.Text())
 					}
 				}(conn)
 			}
 		}()
 
-		fmt.Fprintf(os.Stderr, "Recording trace to .cadr/traces/last_run.jsonl...\n")
-		if err := tracer.RunWithLang(cmdStr, langOverride, func(e tracer.Event) {}); err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
-		}
+		fmt.Fprintf(os.Stderr, "Recording trace to .cadr/traces/runs/%s.jsonl...\n", rw.ID())
+		runErr := tracer.RunWithLang(cmdStr, langOverride, func(e tracer.Event) {})
 		ln.Close()
-		fmt.Fprintf(os.Stderr, "Trace saved to .cadr/traces/last_run.jsonl\n")
+
+		exitCode := 0
+		if runErr != nil {
+			if ee, ok := runErr.(*exec.ExitError); ok {
+				exitCode = ee.ExitCode()
+			} else {
+				exitCode = 1
+			}
+		}
+		if err := rw.Close(exitCode); err != nil {
+			fmt.Printf("Error finalizing run: %v\n", err)
+		}
+		fmt.Fprintf(os.Stderr, "Trace saved to .cadr/traces/runs/%s.jsonl\n", rw.ID())
+		if runErr != nil {
+			fmt.Printf("Error: %v\n", runErr)
+			os.Exit(exitCode)
+		}
+
+	case "trace":
+		runTraceCmd(os.Args[2:])
 
 	case "version", "--version", "-v":
 		fmt.Println("cadr version 0.4.0")

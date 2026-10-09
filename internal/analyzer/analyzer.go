@@ -335,6 +335,14 @@ func hasYesFlag() bool {
 	return false
 }
 
+// Confirm asks a yes/no question, honoring the global -y/--yes flag.
+func Confirm(message string) bool {
+	if hasYesFlag() {
+		return true
+	}
+	return promptYesNo(message)
+}
+
 func promptYesNo(message string) bool {
 	fmt.Fprintf(os.Stderr, "%s [y/N]: ", message)
 	reader := bufio.NewReader(os.Stdin)
