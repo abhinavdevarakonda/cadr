@@ -27,6 +27,9 @@ type traceEvent struct {
 	Fn   string `json:"fn"`
 	File string `json:"file"`
 	Line int    `json:"line"`
+	Ev   string `json:"ev"`
+	Span int64  `json:"span"`
+	TS   int64  `json:"ts"`
 }
 
 func writeFile(t *testing.T, path, content string) {
@@ -93,6 +96,150 @@ func TestInstrumentedGoRun(t *testing.T) {
 		}
 		if !hasEvent(events, "main", mainFile, 9) {
 			t.Fatalf("run %d: missing main@%s:9; got %+v", run, mainFile, events)
+		}
+
+		// Every enter must have a matching exit carrying the same span.
+		for _, e := range events {
+			if e.Ev != "enter" || e.Span == 0 {
+				continue
+			}
+			if d, ok := exitDuration(events, e.Span); !ok {
+				t.Fatalf("run %d: enter %s span %d has no exit; got %+v", run, e.Fn, e.Span, events)
+			} else if e.Fn == "main" && d < int64(400*time.Millisecond) {
+				t.Fatalf("run %d: main duration = %s, want >= 400ms", run, time.Duration(d))
+			}
+		}
+	}
+}
+
+// exitDuration returns the duration (ns) recorded by the exit matching span.
+func exitDuration(events []traceEvent, span int64) (int64, bool) {
+	var start int64 = -1
+	for _, e := range events {
+		if e.Span != span {
+			continue
+		}
+		if e.Ev == "enter" {
+			start = e.TS
+		} else if e.Ev == "exit" && start >= 0 {
+			return e.TS - start, true
+		}
+	}
+	return 0, false
+}
+
+// TestOverlayGoRun exercises the shared-runtime overlay build: one process-wide
+// runtime, so a cross-package call nests correctly and spans are unique.
+func TestOverlayGoRun(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket transport test")
+	}
+	if testing.Short() {
+		t.Skip("builds a Go module")
+	}
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain not available")
+	}
+
+	mod := t.TempDir()
+	writeFile(t, filepath.Join(mod, "go.mod"), "module overlaytest\n\ngo 1.26\n")
+	writeFile(t, filepath.Join(mod, "main.go"), "package main\n\nimport \"overlaytest/lib\"\n\nfunc main() { lib.A() }\n")
+	if err := os.MkdirAll(filepath.Join(mod, "lib"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(mod, "lib", "lib.go"), "package lib\n\nfunc A() { B() }\n\nfunc B() {}\n")
+
+	ob, err := BuildOverlay(mod, filepath.Join(mod, ".cadr", "cache"))
+	if err != nil {
+		t.Fatalf("BuildOverlay: %v", err)
+	}
+	if ob.Count == 0 {
+		t.Fatal("no files instrumented")
+	}
+
+	events := captureEvents(t, mod, ob.Env, []string{"run", "-overlay=" + ob.OverlayPath, "-modfile=" + ob.ModFile, "."})
+
+	// Unique spans across packages.
+	spans := map[int64]int{}
+	var enterOrder []string
+	for _, e := range events {
+		if e.Ev != "enter" {
+			continue
+		}
+		spans[e.Span]++
+		enterOrder = append(enterOrder, e.Fn)
+	}
+	for s, n := range spans {
+		if n > 1 {
+			t.Fatalf("span %d used %d times", s, n)
+		}
+	}
+	if len(enterOrder) < 3 {
+		t.Fatalf("enter order = %v", enterOrder)
+	}
+	// main must arrive before lib.A before lib.B (single sender, exact order).
+	if enterOrder[0] != "main" || enterOrder[1] != "A" || enterOrder[2] != "B" {
+		t.Fatalf("cross-package order = %v (events=%d)", enterOrder, len(events))
+	}
+}
+
+// captureEvents runs a go subcommand and returns the trace events streamed over a
+// fresh unix socket.
+func captureEvents(t *testing.T, dir string, env []string, goArgs []string) []traceEvent {
+	t.Helper()
+	sock := filepath.Join("/tmp", fmt.Sprintf("cadr-ovl-%d.sock", time.Now().UnixNano()))
+	_ = os.Remove(sock)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	events := make(chan traceEvent, 1024)
+	var wg sync.WaitGroup
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			wg.Add(1)
+			go func(c net.Conn) {
+				defer wg.Done()
+				defer c.Close()
+				sc := bufio.NewScanner(c)
+				for sc.Scan() {
+					var e traceEvent
+					if json.Unmarshal(sc.Bytes(), &e) == nil {
+						select {
+						case events <- e:
+						default:
+						}
+					}
+				}
+			}(conn)
+		}
+	}()
+
+	cmd := exec.Command("go", goArgs...)
+	cmd.Dir = dir
+	cmd.Env = append(append([]string{}, env...), "CADR_SOCKET="+sock)
+	out, err := cmd.CombinedOutput()
+	_ = ln.Close()
+	if err != nil {
+		t.Fatalf("go %v failed: %v\n%s", goArgs, err, out)
+	}
+	wg.Wait()
+
+	var got []traceEvent
+	timeout := time.After(2 * time.Second)
+	for {
+		select {
+		case e := <-events:
+			got = append(got, e)
+		case <-timeout:
+			t.Logf("captureEvents go %v out=%q got=%d", goArgs, string(out), len(got))
+			return got
 		}
 	}
 }

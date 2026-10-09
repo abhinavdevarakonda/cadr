@@ -39,7 +39,13 @@ func runGoCmd(fullCmd string, localOnly bool, onEvent func(Event)) error {
 			// instrumented standard library, so tracing is skipped rather than
 			// failing the user's build.
 			fmt.Fprintf(os.Stderr, "cadr: go tracing disabled for %s builds\n", bad)
+		} else if ob, ok := toolwrap.PrepareOverlay("."); ok {
+			// Preferred: one shared runtime module via -overlay, so span/seq are
+			// process-global and cross-package order is exact.
+			env = ob.Env
+			parts = injectBuildFlags(parts, ob.OverlayPath, ob.ModFile)
 		} else if goEnv, ok := toolwrap.PrepareEnv("."); ok {
+			// Fallback: per-package runtime via -toolexec.
 			env = goEnv
 			parts = injectToolexec(parts)
 		}
@@ -111,6 +117,45 @@ func goVerbNeedsTrace(parts []string) bool {
 		}
 	}
 	return false
+}
+
+// injectBuildFlags inserts -overlay and -modfile after the go verb unless the
+// user already supplied them.
+func injectBuildFlags(parts []string, overlay, modfile string) []string {
+	verbIdx := -1
+	for i := 1; i < len(parts); i++ {
+		if goVerbList[parts[i]] {
+			verbIdx = i
+			break
+		}
+	}
+	if verbIdx == -1 {
+		return parts
+	}
+	hasOverlay, hasModfile := false, false
+	for _, a := range parts {
+		if a == "-overlay" || strings.HasPrefix(a, "-overlay=") {
+			hasOverlay = true
+		}
+		if a == "-modfile" || strings.HasPrefix(a, "-modfile=") {
+			hasModfile = true
+		}
+	}
+	var flags []string
+	if !hasOverlay {
+		flags = append(flags, "-overlay="+overlay)
+	}
+	if !hasModfile {
+		flags = append(flags, "-modfile="+modfile)
+	}
+	if len(flags) == 0 {
+		return parts
+	}
+	out := make([]string, 0, len(parts)+len(flags))
+	out = append(out, parts[:verbIdx+1]...)
+	out = append(out, flags...)
+	out = append(out, parts[verbIdx+1:]...)
+	return out
 }
 
 // injectToolexec inserts -toolexec after the go verb unless the user already

@@ -127,7 +127,12 @@ func receiverTypeName(expr ast.Expr) string {
 // planInsertions returns the trace calls to splice into f. Function-level
 // granularity only: name (Recv.Method for methods), absolute file and the
 // declaration line, matching the graph's Symbol.Name/Path/StartLine.
-func planInsertions(fset *token.FileSet, f *ast.File, absPath string) []insertion {
+//
+// mode full injects an enter call plus a deferred exit (call tree, durations);
+// mode light keeps the legacy single entry call. When runtimeImport is non-empty
+// the calls go through the shared `__cadr` package (overlay build); otherwise
+// they use the injected per-package `__cadr_*` runtime (legacy -toolexec).
+func planInsertions(fset *token.FileSet, f *ast.File, absPath, mode, runtimeImport string) []insertion {
 	var out []insertion
 	for _, decl := range f.Decls {
 		fd, ok := decl.(*ast.FuncDecl)
@@ -147,10 +152,45 @@ func planInsertions(fset *token.FileSet, f *ast.File, absPath string) []insertio
 		line := fset.Position(fd.Pos()).Line
 		offset := fset.Position(fd.Body.Lbrace).Offset + 1
 		// No trailing newline: line numbers of all following code stay exact.
-		text := " __cadr_trace(" + strconv.Quote(full) + "," + strconv.Quote(absPath) + "," + strconv.Itoa(line) + ");"
+		var text string
+		switch {
+		case runtimeImport != "" && mode == ModeLight:
+			text = " __cadr.Trace(" + strconv.Quote(full) + "," + strconv.Quote(absPath) + "," + strconv.Itoa(line) + ");"
+		case runtimeImport != "":
+			prelude := ""
+			if f.Name.Name == "main" && name == "main" && fd.Recv == nil {
+				prelude = " defer __cadr.Flush();"
+			}
+			text = prelude + " __cadr_s := __cadr.Enter(" + strconv.Quote(full) + "," + strconv.Quote(absPath) + "," + strconv.Itoa(line) + ");defer __cadr.Exit(__cadr_s);"
+		case mode == ModeLight:
+			text = " __cadr_trace(" + strconv.Quote(full) + "," + strconv.Quote(absPath) + "," + strconv.Itoa(line) + ");"
+		default:
+			// The instrumented main registers the drain barrier first so it runs
+			// last (defer LIFO) and flushes the root exit before process exit.
+			prelude := ""
+			if f.Name.Name == "main" && name == "main" && fd.Recv == nil {
+				prelude = " defer __cadr_flush();"
+			}
+			text = prelude + " __cadr_s := __cadr_enter(" + strconv.Quote(full) + "," + strconv.Quote(absPath) + "," + strconv.Itoa(line) + ");defer __cadr_exit(__cadr_s);"
+		}
 		out = append(out, insertion{offset: offset, text: text})
 	}
 	return out
+}
+
+// importsPath reports whether f imports importPath.
+func importsPath(f *ast.File, importPath string) bool {
+	for _, imp := range f.Imports {
+		if strings.Trim(imp.Path.Value, "\"") == importPath {
+			return true
+		}
+	}
+	return false
+}
+
+// importsC reports whether f is a cgo file (import "C").
+func importsC(f *ast.File) bool {
+	return importsPath(f, "C")
 }
 
 // applyInsertions splices ins into src back-to-front so earlier offsets remain
@@ -174,8 +214,10 @@ func applyInsertions(src []byte, ins []insertion) []byte {
 // instrumentSource rewrites one file, returning the instrumented source, the
 // number of trace calls inserted and the file's package name. A nil out with
 // nil error means the file was intentionally left untouched (outside root,
-// generated, or no instrumentable functions).
-func instrumentSource(path string, src []byte, root string) (out []byte, count int, pkg string, err error) {
+// generated, cgo, already instrumented, or no instrumentable functions). mode
+// is ModeFull or ModeLight. runtimeImport selects the shared overlay runtime
+// package; empty means the legacy per-package runtime.
+func instrumentSource(path string, src []byte, root, mode, runtimeImport string) (out []byte, count int, pkg string, err error) {
 	if !shouldInstrument(path, root) || isGenerated(src) {
 		return nil, 0, "", nil
 	}
@@ -188,9 +230,24 @@ func instrumentSource(path string, src []byte, root string) (out []byte, count i
 	if err != nil {
 		return nil, 0, "", err
 	}
-	ins := planInsertions(fset, f, abs)
+	if runtimeImport != "" {
+		// The overlay build adds the import itself, so a file that already
+		// imports the runtime (or is cgo) is left alone.
+		if importsPath(f, runtimeImport) || importsC(f) {
+			return nil, 0, f.Name.Name, nil
+		}
+	}
+	ins := planInsertions(fset, f, abs, mode, runtimeImport)
 	if len(ins) == 0 {
 		return nil, 0, f.Name.Name, nil
+	}
+	if runtimeImport != "" {
+		// `package X; import __cadr "..."` on the package line keeps every
+		// following line number exact.
+		ins = append(ins, insertion{
+			offset: fset.Position(f.Name.End()).Offset,
+			text:   "; import __cadr " + strconv.Quote(runtimeImport),
+		})
 	}
 	return applyInsertions(src, ins), len(ins), f.Name.Name, nil
 }

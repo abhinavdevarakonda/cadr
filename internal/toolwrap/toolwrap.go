@@ -65,6 +65,7 @@ func maybeInstrumentCompile(rest []string) (newArgs []string, cleanup func(), ok
 	var todo []prepared
 	pkg := ""
 	total := 0
+	mode := TraceModeFromEnv()
 	for _, f := range files {
 		abs, err := filepath.Abs(f)
 		if err != nil {
@@ -74,7 +75,7 @@ func maybeInstrumentCompile(rest []string) (newArgs []string, cleanup func(), ok
 		if err != nil {
 			continue
 		}
-		out, n, p, err := instrumentSource(abs, src, root)
+		out, n, p, err := instrumentSource(abs, src, root, mode, "")
 		if err != nil {
 			// Leave unparsable files untouched; the real compiler reports them.
 			continue
@@ -111,8 +112,9 @@ func maybeInstrumentCompile(rest []string) (newArgs []string, cleanup func(), ok
 		rewrites = append(rewrites, tmpPath+"=>"+p.orig)
 	}
 
+	ns := PackageNamespace(filepath.Dir(todo[0].orig))
 	runtimePath := filepath.Join(tmpDir, "__cadr_runtime.go")
-	if err := os.WriteFile(runtimePath, []byte(runtimeSource(pkg)), 0644); err != nil {
+	if err := os.WriteFile(runtimePath, []byte(runtimeSource(pkg, ns)), 0644); err != nil {
 		cleanup()
 		return nil, nil, false
 	}

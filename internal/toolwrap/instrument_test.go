@@ -72,7 +72,7 @@ func TestInstrumentSource(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out, n, pkg, err := instrumentSource(path, []byte(tt.src), root)
+			out, n, pkg, err := instrumentSource(path, []byte(tt.src), root, ModeLight, "")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -105,6 +105,87 @@ func TestInstrumentSource(t *testing.T) {
 	}
 }
 
+func TestInstrumentSourceFull(t *testing.T) {
+	root := "/proj"
+	path := "/proj/pkg/app.go"
+	src := "package app\n\nfunc Add(a, b int) int {\n\treturn a + b\n}\n\nfunc Empty() {}\n"
+
+	out, n, pkg, err := instrumentSource(path, []byte(src), root, ModeFull, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n != 2 || pkg != "app" {
+		t.Fatalf("n=%d pkg=%q", n, pkg)
+	}
+	got := string(out)
+	for _, want := range []string{
+		`__cadr_s := __cadr_enter("Add","/proj/pkg/app.go",3);defer __cadr_exit(__cadr_s);`,
+		`__cadr_s := __cadr_enter("Empty","/proj/pkg/app.go",7);defer __cadr_exit(__cadr_s);`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if callCount(got) != 0 {
+		t.Errorf("full mode must not emit legacy __cadr_trace calls:\n%s", got)
+	}
+	if strings.Count(got, "__cadr_enter(") != 2 || strings.Count(got, "__cadr_exit(") != 2 {
+		t.Errorf("expected 2 enter/exit pairs:\n%s", got)
+	}
+	if got := lineCount(string(out)); got != lineCount(src) {
+		t.Fatalf("line count changed: %d -> %d\n%s", lineCount(src), got, out)
+	}
+}
+
+func TestInstrumentSourceSharedImport(t *testing.T) {
+	root := "/proj"
+	path := "/proj/pkg/app.go"
+	src := "package app\n\nimport \"fmt\"\n\nfunc Add(a, b int) int {\n\tfmt.Println(a)\n\treturn a + b\n}\n"
+	const imp = "example.com/m/cadr_runtime"
+
+	out, n, pkg, err := instrumentSource(path, []byte(src), root, ModeFull, imp)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n != 2 || pkg != "app" {
+		t.Fatalf("n=%d pkg=%q", n, pkg)
+	}
+	got := string(out)
+	if !strings.Contains(got, "package app; import __cadr \""+imp+"\"") {
+		t.Errorf("missing same-line shared import:\n%s", got)
+	}
+	if !strings.Contains(got, `__cadr_s := __cadr.Enter("Add","/proj/pkg/app.go",5);defer __cadr.Exit(__cadr_s);`) {
+		t.Errorf("missing shared Enter/Exit call:\n%s", got)
+	}
+	if strings.Contains(got, "__cadr_enter(") || strings.Contains(got, "__cadr_trace(") {
+		t.Errorf("shared mode must not use legacy calls:\n%s", got)
+	}
+	// Line count is unchanged, so declaration lines (and the static graph's
+	// file:line identity) stay exact.
+	if got := lineCount(string(out)); got != lineCount(src) {
+		t.Fatalf("line count changed: %d -> %d\n%s", lineCount(src), got, out)
+	}
+}
+
+func TestInstrumentSourceSharedImportSkips(t *testing.T) {
+	root := "/proj"
+	path := "/proj/pkg/app.go"
+	// A file that already imports the runtime, and a cgo file, must be skipped.
+	cases := [][]byte{
+		[]byte("package app\n\nimport __cadr \"example.com/m/cadr_runtime\"\n\nfunc A() { _ = __cadr.Enter }\n"),
+		[]byte("package app\n\n/*\n#include <stdio.h>\n*/\nimport \"C\"\n\nfunc A() {}\n"),
+	}
+	for _, src := range cases {
+		out, n, _, err := instrumentSource(path, src, root, ModeFull, "example.com/m/cadr_runtime")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if n != 0 || out != nil {
+			t.Fatalf("expected skip, got n=%d out=%q", n, out)
+		}
+	}
+}
+
 func TestInstrumentSourceSkips(t *testing.T) {
 	src := []byte("package app\n\nfunc Keep() {}\n")
 	cases := []struct {
@@ -126,7 +207,7 @@ func TestInstrumentSourceSkips(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			out, n, _, err := instrumentSource(tt.path, tt.src, tt.root)
+			out, n, _, err := instrumentSource(tt.path, tt.src, tt.root, ModeLight, "")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -150,6 +231,18 @@ func TestSplitArgs(t *testing.T) {
 	flags, files = splitArgs([]string{"-V=full"})
 	if len(files) != 0 || len(flags) != 1 {
 		t.Fatalf("probe: flags=%v files=%v", flags, files)
+	}
+}
+
+func TestPackageNamespace(t *testing.T) {
+	a1 := PackageNamespace("/proj/pkg/a")
+	a2 := PackageNamespace("/proj/pkg/a")
+	b := PackageNamespace("/proj/pkg/b")
+	if a1 != a2 {
+		t.Fatalf("namespace not stable: %d vs %d", a1, a2)
+	}
+	if a1 == b {
+		t.Fatalf("distinct dirs collided: %d", a1)
 	}
 }
 
