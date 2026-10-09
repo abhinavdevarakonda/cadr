@@ -5,11 +5,26 @@ import threading
 import queue
 import os
 import time
+import atexit
+import itertools
 
 _sock = None
 _event_queue = queue.Queue()
 _sock_connected = threading.Event()
 _project_root = os.path.realpath(os.getcwd())
+_local_only = os.environ.get("CADR_LOCAL_ONLY") == "1"
+
+# Schema v2 bookkeeping. seq is a monotonic counter (gap/drop detection) and ts
+# is nanoseconds since process start (durations only; line order is order).
+_pid = os.getpid()
+_start_ns = time.perf_counter_ns()
+_span_counter = itertools.count(1)
+_seq_counter = itertools.count(1)
+
+# atexit barrier: the sender thread is a daemon, so the interpreter would
+# otherwise drop events still queued when the process tears down.
+_FLUSH = object()
+_flush_done = threading.Event()
 
 def _sender_thread():
     global _sock
@@ -31,6 +46,9 @@ def _sender_thread():
             
             while True:
                 event = _event_queue.get()
+                if event is _FLUSH:
+                    _flush_done.set()
+                    continue
                 try:
                     line = (json.dumps(event) + "\n").encode('utf-8')
                     _sock.sendall(line)
@@ -53,8 +71,67 @@ def _safe_repr(value):
 
 _filename_cache = {}
 
+def _ctx_id():
+    """Execution context = (thread id, asyncio task id). Guards asyncio import."""
+    task_id = 0
+    try:
+        import asyncio
+        task = asyncio.current_task()
+        if task is not None:
+            task_id = id(task)
+    except Exception:
+        pass
+    return "%d:%d" % (threading.get_ident(), task_id)
+
+def _emit(event_data):
+    """Queue an event for the background sender; mirror to stderr when there is
+    no connection so a local/synchronous trace still sees everything."""
+    if _local_only:
+        print(json.dumps(event_data), file=sys.stderr, flush=True)
+        return
+    _event_queue.put(event_data)
+    if not _sock_connected.is_set():
+        print(json.dumps(event_data), file=sys.stderr, flush=True)
+
+def _emit_enter(func_name, filename, line, args, span, ctx):
+    _emit({
+        "lang": "python",
+        "fn": func_name,
+        "file": filename,
+        "line": line,
+        "ev": "enter",
+        "ctx": ctx,
+        "span": span,
+        "seq": next(_seq_counter),
+        "pid": _pid,
+        "ts": time.perf_counter_ns() - _start_ns,
+        "args": args,
+    })
+
+def _emit_exit(span, ctx):
+    _emit({
+        "lang": "python",
+        "ev": "exit",
+        "ctx": ctx,
+        "span": span,
+        "seq": next(_seq_counter),
+        "pid": _pid,
+        "ts": time.perf_counter_ns() - _start_ns,
+    })
+
+def _local_tracer(span, ctx):
+    """Per-frame tracer that emits the matching exit on return. The span is
+    captured in the closure, so no global frame map is needed."""
+    def local_trace(frame, event, arg):
+        if event == 'return':
+            _emit_exit(span, ctx)
+            return None
+        return local_trace
+    return local_trace
+
 def trace_calls(frame, event, arg):
-    """Callback for sys.settrace. Captures function calls and emits JSON metadata."""
+    """Callback for sys.settrace. Emits an enter event and installs a local
+    tracer that emits the matching exit (schema v2 call tree)."""
     if event != 'call':
         return None
     
@@ -88,21 +165,10 @@ def trace_calls(frame, event, arg):
     arg_names = code.co_varnames[:code.co_argcount]
     args = {name: _safe_repr(frame.f_locals.get(name)) for name in arg_names}
 
-    event_data = {
-        "fn": func_name,
-        "file": filename,
-        "line": frame.f_lineno,
-        "args": args,
-    }
-    
-    # Send to the background thread
-    _event_queue.put(event_data)
-    
-    # Log to local stderr if not connected (fallback)
-    if not _sock_connected.is_set():
-        print(json.dumps(event_data), file=sys.stderr, flush=True)
-        
-    return trace_calls
+    span = next(_span_counter)
+    ctx = _ctx_id()
+    _emit_enter(func_name, filename, frame.f_lineno, args, span, ctx)
+    return _local_tracer(span, ctx)
 
 def _extract_path_params(path):
     import re
@@ -291,3 +357,16 @@ def start():
     sys.settrace(trace_calls)
     # Attach to all future Threads spawned by this Python process
     threading.settrace(trace_calls)
+    # Drain the daemon sender on interpreter exit so the root span is never lost.
+    atexit.register(_flush)
+
+def _flush(timeout=2.0):
+    """Wait for queued events to reach the monitor. No-op when local-only or
+    when there is no connection (events were mirrored to stderr already)."""
+    if _local_only or not _sock_connected.is_set() or _flush_done.is_set():
+        return
+    try:
+        _event_queue.put(_FLUSH)
+        _flush_done.wait(timeout)
+    except Exception:
+        pass
