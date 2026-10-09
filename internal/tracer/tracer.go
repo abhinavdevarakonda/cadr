@@ -16,11 +16,22 @@ import (
 	"github.com/abhinavdevarakonda/cadr/internal/agents"
 )
 
+// Event is the language-neutral trace event (schema v2). Legacy v1 lines only
+// carry fn/file/line/args; the missing fields are zero-valued and the event is
+// treated as an enter (see NormalizeEvent).
 type Event struct {
+	Lang string                 `json:"lang,omitempty"`
 	Name string                 `json:"fn"`
 	File string                 `json:"file"`
 	Line int                    `json:"line"`
-	Args map[string]interface{} `json:"args"`
+	Ev   string                 `json:"ev,omitempty"` // enter | exit ("" = legacy enter)
+	Ctx  string                 `json:"ctx,omitempty"`
+	Span int64                  `json:"span,omitempty"`
+	Seq  int64                  `json:"seq,omitempty"`
+	PID  int                    `json:"pid,omitempty"`
+	TS   int64                  `json:"ts,omitempty"`
+	Args map[string]interface{} `json:"args,omitempty"`
+	Sym  string                 `json:"sym,omitempty"`
 }
 
 type Recording struct {
