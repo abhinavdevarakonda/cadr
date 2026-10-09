@@ -96,8 +96,23 @@ type Model struct {
 	playhead     int
 	isLive       bool
 	isMonitoring bool
-	hitCounts    map[string]int // ID -> count
+	hitCounts    map[string]int // ID -> count (enter events only)
 	rightScroll  int
+
+	// Tree view bookkeeping (parallel to history, enter events only).
+	depths      []int
+	ctxs        []string
+	ctxRoots    []bool
+	parentIdx   []int // parent enter index, -1 for a context root
+	lastChild   []bool
+	lastAtDepth map[string]map[int]int // ctx -> depth -> history index (preorder)
+	spanIndex   map[int64]int
+	spanCtx     map[int64]string
+	parentSpan  map[int64]int64
+	childDur    map[int64]int64
+	durNs       map[int64]int64
+	selfNs      map[int64]int64
+	ctxStack    map[string][]int
 
 	// Search & QoL
 	searching   bool
@@ -146,6 +161,14 @@ func NewModel(g *graph.Graph, projectRoot string) Model {
 		isLive:        true,
 		followLive:    true,
 		hitCounts:     make(map[string]int),
+		lastAtDepth:   make(map[string]map[int]int),
+		spanIndex:     make(map[int64]int),
+		spanCtx:       make(map[int64]string),
+		parentSpan:    make(map[int64]int64),
+		childDur:      make(map[int64]int64),
+		durNs:         make(map[int64]int64),
+		selfNs:        make(map[int64]int64),
+		ctxStack:      make(map[string][]int),
 		diffMgr:       diff.NewManager(absRoot),
 		diffMap:       make(map[string]*diff.FileDiff),
 	}
@@ -441,15 +464,143 @@ func getSignature(path string, line int) string {
 	return ""
 }
 
+// applyTraceEvent consumes one raw event. Enter events become rows; exit events
+// annotate the matching enter node with duration/self-time. This keeps
+// m.history, the hit heatmap and the 'Hit N/M' counter enter-only, so existing
+// semantics are unchanged even though the wire now carries both halves.
 func (m *Model) applyTraceEvent(e tracer.Event) {
-	m.history = append(m.history, e)
+	e = tracer.NormalizeEvent(e)
 
-	// Update Heatmap
+	if e.Ev == tracer.EvExit {
+		idx, ok := m.spanIndex[e.Span]
+		if !ok {
+			return
+		}
+		start := m.history[idx].TS
+		var dur int64
+		if e.TS >= start {
+			dur = e.TS - start
+		}
+		m.durNs[e.Span] = dur
+		self := dur - m.childDur[e.Span]
+		if self < 0 {
+			self = 0
+		}
+		m.selfNs[e.Span] = self
+		if ps := m.parentSpan[e.Span]; ps > 0 {
+			m.childDur[ps] += dur
+		}
+		if ctx, ok := m.spanCtx[e.Span]; ok {
+			st := m.ctxStack[ctx]
+			for i := len(st) - 1; i >= 0; i-- {
+				if m.history[st[i]].Span == e.Span {
+					m.ctxStack[ctx] = st[:i]
+					break
+				}
+			}
+		}
+		return
+	}
+
+	// Enter (legacy v1 events normalize to enter).
+	ctx := e.Ctx
+	stack := m.ctxStack[ctx]
+	depth := len(stack)
+	idx := len(m.history)
+	m.history = append(m.history, e)
+	m.depths = append(m.depths, depth)
+	m.ctxs = append(m.ctxs, ctx)
+	ctxRoot := idx == 0 || ctx != m.ctxs[idx-1]
+	m.ctxRoots = append(m.ctxRoots, ctxRoot)
+	m.lastChild = append(m.lastChild, true)
+	if depth == 0 {
+		m.parentIdx = append(m.parentIdx, -1)
+	} else {
+		m.parentIdx = append(m.parentIdx, stack[depth-1])
+	}
+	// Preorder last-child, per context: a new row at depth d closes every
+	// deeper subtree (those rows become last children) and is a sibling of any
+	// previous row at depth d (that row is no longer last).
+	mad := m.lastAtDepth[ctx]
+	if mad == nil {
+		mad = make(map[int]int)
+		m.lastAtDepth[ctx] = mad
+	}
+	for dd, pi := range mad {
+		if dd > depth {
+			m.lastChild[pi] = true
+			delete(mad, dd)
+		}
+	}
+	if prev, ok := mad[depth]; ok {
+		m.lastChild[prev] = false
+	}
+	mad[depth] = idx
+	if e.Span > 0 {
+		m.spanIndex[e.Span] = idx
+		m.spanCtx[e.Span] = ctx
+		m.childDur[e.Span] = 0
+		if depth > 0 {
+			m.parentSpan[e.Span] = m.history[stack[depth-1]].Span
+		}
+	}
+	m.ctxStack[ctx] = append(stack, idx)
+
+	// Heatmap: enter events only, so counts and heat thresholds are unchanged.
 	for id, n := range m.graph.Nodes {
 		if n.Type == graph.FunctionNode && (n.Name == e.Name || strings.HasSuffix(e.Name, "."+n.Name)) && strings.HasSuffix(e.File, n.Path) {
 			m.hitCounts[id]++
 			break
 		}
+	}
+}
+
+func (m *Model) rowLast(i int) bool {
+	if i >= len(m.lastChild) {
+		return true
+	}
+	return m.lastChild[i]
+}
+
+// treeBars returns the vertical continuation bars for row i's ancestors above
+// its immediate parent (the level-1..depth-2 prefixes), outermost first. Roots
+// never draw a continuation bar.
+func (m *Model) treeBars(i int) string {
+	if i >= len(m.parentIdx) {
+		return ""
+	}
+	// Skip the immediate parent: its connector is drawn separately.
+	p := m.parentIdx[i]
+	if p >= 0 && p < len(m.parentIdx) {
+		p = m.parentIdx[p]
+	}
+	var parts []string
+	for ; p >= 0 && p < len(m.parentIdx); p = m.parentIdx[p] {
+		switch {
+		case p < len(m.depths) && m.depths[p] == 0:
+			parts = append(parts, "   ")
+		case p < len(m.lastChild) && m.lastChild[p]:
+			parts = append(parts, "   ")
+		default:
+			parts = append(parts, "│  ")
+		}
+	}
+	for l, r := 0, len(parts)-1; l < r; l, r = l+1, r-1 {
+		parts[l], parts[r] = parts[r], parts[l]
+	}
+	return strings.Join(parts, "")
+}
+
+func fmtDurTUI(ns int64) string {
+	switch {
+	case ns < 1000:
+		return fmt.Sprintf("%dns", ns)
+	case ns < 1000000:
+		return fmt.Sprintf("%.1fµs", float64(ns)/1e3)
+	case ns < 1000000000:
+		return fmt.Sprintf("%.2fms", float64(ns)/1e6)
+	default:
+		return fmt.Sprintf("%.2fs", float64(ns)/1e9)
 	}
 }
 
@@ -1183,11 +1334,51 @@ func (m Model) View() string {
 
 		for i := m.rightScroll; i < endHit; i++ {
 			hit := m.history[i]
-			prefix := "  "
+			cursor := "  "
 			if i == m.playhead {
-				prefix = "> "
+				cursor = "> "
 			}
-			line := fmt.Sprintf("%s#%d %s", prefix, i+1, hit.Name)
+			depth := 0
+			if i < len(m.depths) {
+				depth = m.depths[i]
+			}
+			isRoot := i < len(m.ctxRoots) && m.ctxRoots[i]
+			bars := m.treeBars(i)
+			conn := ""
+			if depth > 0 {
+				if m.rowLast(i) {
+					conn = "└─ "
+				} else {
+					conn = "├─ "
+				}
+			}
+			marker := ""
+			if isRoot {
+				marker = "▸ "
+			}
+			// Heat by self-time: time spent in the function excluding children.
+			self := m.selfNs[hit.Span]
+			nameStyle := funcStyle
+			switch {
+			case self >= 100*int64(time.Millisecond):
+				nameStyle = heatHigh
+			case self >= 20*int64(time.Millisecond):
+				nameStyle = heatMed
+			case self > 0:
+				nameStyle = heatLow
+			}
+			name := marker + nameStyle.Render(hit.Name)
+			if d := m.durNs[hit.Span]; d > 0 {
+				name += " " + faintStyle.Render("["+fmtDurTUI(d)+"]")
+				// The focused row also shows self-time (time in the function
+				// itself), which is what the heat colour encodes.
+				if i == m.playhead {
+					if s := m.selfNs[hit.Span]; s > 0 {
+						name += " " + faintStyle.Render("self "+fmtDurTUI(s))
+					}
+				}
+			}
+			line := fmt.Sprintf("%s#%d %s%s%s", cursor, i+1, bars, conn, name)
 			if i == m.playhead {
 				line = glowStyle.Render(line)
 			}
