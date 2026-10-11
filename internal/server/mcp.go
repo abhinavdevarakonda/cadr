@@ -27,7 +27,10 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		mcp.WithString("path", mcp.Description("Absolute path to the project root"), mcp.Required()),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		newPath, _ := request.RequireString("path")
-		newResult := analyzer.Analyze(newPath)
+		newResult, err := analyzer.Analyze(newPath)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("failed to analyze %s: %v", newPath, err)), nil
+		}
 		*result = newResult // update shared pointer
 
 		var funcCount int
@@ -410,6 +413,15 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		rep := tracer.Verify(run.Events)
+		if result.Graph != nil {
+			var sf []tracer.StaticFunc
+			for _, n := range result.Graph.Nodes {
+				if n.Type == graph.FunctionNode {
+					sf = append(sf, tracer.StaticFunc{Name: n.Name, File: n.Path, Line: n.Line})
+				}
+			}
+			rep = tracer.VerifyWithGraph(run.Events, sf, 10)
+		}
 		var b strings.Builder
 		fmt.Fprintf(&b, "run %s: ok=%v events=%d enter=%d exit=%d ctx=%d open=%d dropped=%d\n",
 			run.ID, rep.OK, rep.Counts.Events, rep.Counts.Enters, rep.Counts.Exits, rep.Counts.Contexts, rep.Counts.OpenSpans, rep.Counts.Dropped)

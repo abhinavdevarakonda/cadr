@@ -75,9 +75,10 @@ func main() {
 
 	// cadr or cadr <path> → open TUI directly
 	if len(os.Args) < 2 {
-		result := analyzer.Analyze(".")
+		result := analyzeOrExit(".")
 		if err := tui.Start(result.Graph, "."); err != nil {
-			panic(err)
+			fmt.Fprintf(os.Stderr, "cadr: %v\n", err)
+			os.Exit(1)
 		}
 		return
 	}
@@ -99,9 +100,14 @@ func main() {
 		"tool-wrap": true,
 	}
 	if !knownCommands[command] {
-		result := analyzer.Analyze(command)
+		if _, err := os.Stat(command); err != nil {
+			fmt.Fprintf(os.Stderr, "cadr: unknown command or path not found: %s\n", command)
+			os.Exit(2)
+		}
+		result := analyzeOrExit(command)
 		if err := tui.Start(result.Graph, command); err != nil {
-			panic(err)
+			fmt.Fprintf(os.Stderr, "cadr: %v\n", err)
+			os.Exit(1)
 		}
 		return
 	}
@@ -136,7 +142,7 @@ func main() {
 		runAPICmd(targetPath, globalMode)
 
 	case "analyze":
-		result := analyzer.Analyze(path)
+		result := analyzeOrExit(path)
 		g := result.Graph
 
 		var functionCount int
@@ -178,7 +184,7 @@ func main() {
 			rawInput = os.Args[3]
 		}
 
-		result := analyzer.Analyze(path)
+		result := analyzeOrExit(path)
 		g := result.Graph
 
 		resolvedId, err := resolveSymbol(g, rawInput)
@@ -200,20 +206,22 @@ func main() {
 		}
 
 	case "export":
-		result := analyzer.Analyze(path)
+		result := analyzeOrExit(path)
 
 		data, err := json.MarshalIndent(result.Graph, "", " ")
 		if err != nil {
-			panic(err)
+			fmt.Fprintf(os.Stderr, "cadr: %v\n", err)
+			os.Exit(1)
 		}
 		fmt.Println(string(data))
 
 	case "serve":
-		result := analyzer.Analyze(path)
+		result := analyzeOrExit(path)
 
 		srv := server.New(result.Graph)
 		if err := srv.Start("localhost:6433"); err != nil {
-			panic(err)
+			fmt.Fprintf(os.Stderr, "cadr: %v\n", err)
+			os.Exit(1)
 		}
 
 	case "mcp":
@@ -224,12 +232,18 @@ func main() {
 
 		// run analysis in background so it doesn't block server startup
 		go func() {
-			fullResult := analyzer.Analyze(path)
+			fullResult, err := analyzer.Analyze(path)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "cadr: %v\n", err)
+				*result = analyzer.Result{Root: path, Graph: graph.New()}
+				return
+			}
 			*result = fullResult
 		}()
 
 		if err := stdioSrv.Listen(context.Background(), os.Stdin, os.Stdout); err != nil {
-			panic(err)
+			fmt.Fprintf(os.Stderr, "cadr: %v\n", err)
+			os.Exit(1)
 		}
 
 	case "run":
@@ -406,6 +420,17 @@ func resolveSymbol(g *graph.Graph, input string) (string, error) {
 	}
 
 	return "", fmt.Errorf("symbol %q not found", input)
+}
+
+// analyzeOrExit runs the analyzer for a CLI command and exits with the CLI
+// error contract (message on stderr, exit 2) if the path cannot be read.
+func analyzeOrExit(root string) analyzer.Result {
+	result, err := analyzer.Analyze(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cadr: %v\n", err)
+		os.Exit(2)
+	}
+	return result
 }
 
 func loadDefaultRunCmd(root string) (string, string) {

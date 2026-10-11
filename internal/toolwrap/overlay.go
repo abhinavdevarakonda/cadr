@@ -38,6 +38,75 @@ func ModuleInfo(root string) (moduleInfo, bool) {
 	return m, true
 }
 
+// OverlaySupported reports whether the -overlay/-modfile build path is safe for
+// a go invocation in root with the given arguments. It returns a human reason
+// when it is not, so the caller can log the -toolexec fallback.
+//
+// Two situations make -modfile unsafe:
+//   - workspace mode (`go.work`/GOWORK): -modfile is not supported and cmd/go
+//     errors out;
+//   - vendoring (-mod=vendor/GOFLAGS/vendor/modules.txt): the alternate modfile
+//     would not use vendor/, so the build would fail or fetch modules.
+func OverlaySupported(root string, args []string) (bool, string) {
+	if work := goWorkFile(root); work != "" {
+		return false, "workspace mode (" + work + ")"
+	}
+	if vendoringActive(root, args) {
+		return false, "vendoring"
+	}
+	return true, ""
+}
+
+// goWorkFile returns the effective workspace file, or "" when no workspace is
+// active. GOWORK/`go env GOWORK` are authoritative (and understand "off"), with
+// a filesystem walk as a fallback when the go tool is unavailable.
+func goWorkFile(root string) string {
+	if w := os.Getenv("GOWORK"); w != "" {
+		if w == "off" {
+			return ""
+		}
+		return w
+	}
+	cmd := exec.Command("go", "env", "GOWORK")
+	cmd.Dir = root
+	if out, err := cmd.Output(); err == nil {
+		if w := strings.TrimSpace(string(out)); w != "" && w != "off" {
+			return w
+		}
+		return ""
+	}
+	dir, err := filepath.Abs(root)
+	if err != nil {
+		return ""
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.work")); err == nil {
+			return filepath.Join(dir, "go.work")
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// vendoringActive reports whether the build resolves modules from vendor/.
+func vendoringActive(root string, args []string) bool {
+	for _, a := range args {
+		if a == "-mod=vendor" {
+			return true
+		}
+	}
+	if strings.Contains(os.Getenv("GOFLAGS"), "mod=vendor") {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(root, "vendor", "modules.txt")); err == nil {
+		return true
+	}
+	return false
+}
+
 // overlayKeys returns every path form the go tool might use to look up a file:
 // the path as walked, its symlink-resolved form, and the /private-stripped or
 // /private-prefixed form (macOS temp dirs). Without this, an overlay under
@@ -85,6 +154,11 @@ func BuildOverlay(root, cacheDir string) (*OverlayBuild, error) {
 	mod, ok := ModuleInfo(root)
 	if !ok {
 		return nil, fmt.Errorf("not inside a Go module")
+	}
+	// Fail cleanly instead of writing an overlay the go tool cannot use
+	// (workspace mode has no -modfile support; vendoring bypasses it).
+	if supported, reason := OverlaySupported(mod.Dir, nil); !supported {
+		return nil, fmt.Errorf("overlay build unsupported: %s", reason)
 	}
 	// The go tool canonicalises symlinked temp dirs (/var -> /private/var on
 	// macOS), so overlay keys must use the resolved paths or they are ignored.

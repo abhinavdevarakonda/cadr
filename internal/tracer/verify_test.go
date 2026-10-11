@@ -96,6 +96,25 @@ func TestVerifyLegacyNoIncompleteWarning(t *testing.T) {
 	}
 }
 
+// A parent with no exit yet (Ctrl-C on a live server) has duration 0, so its
+// children must not be reported as exceeding it.
+func TestVerifyOpenParentChildTimeNotError(t *testing.T) {
+	events := []Event{
+		ev("main", EvEnter, "1", 1, 0),
+		ev("child", EvEnter, "1", 2, 10),
+		ev("", EvExit, "1", 2, 100),
+	}
+	rep := Verify(events)
+	for _, e := range rep.Errors {
+		if e.Check == "child_time_exceeds_parent" {
+			t.Fatalf("open parent must not report child_time_exceeds_parent: %+v", rep.Errors)
+		}
+	}
+	if !rep.OK {
+		t.Fatalf("open parent with a closed child should pass: %+v", rep.Errors)
+	}
+}
+
 func TestVerifyDuplicateSpan(t *testing.T) {
 	events := []Event{
 		ev("a", EvEnter, "1", 7, 0),
@@ -104,5 +123,92 @@ func TestVerifyDuplicateSpan(t *testing.T) {
 	rep := Verify(events)
 	if rep.OK {
 		t.Fatal("expected duplicate_span error")
+	}
+}
+
+func graphChecks(rep *VerifyReport) map[string]bool {
+	got := map[string]bool{}
+	for _, w := range rep.Warnings {
+		got[w.Check] = true
+	}
+	return got
+}
+
+// A function that ran but is not in the static graph is a dynamic_only warning;
+// the trace itself is still ok.
+func TestVerifyWithGraphDynamicOnly(t *testing.T) {
+	events := []Event{
+		ev("ghost", EvEnter, "1", 1, 0),
+		ev("", EvExit, "1", 1, 5),
+	}
+	static := []StaticFunc{{Name: "other", File: "/p/f.go", Line: 7}}
+
+	rep := VerifyWithGraph(events, static, 10)
+	if !rep.OK {
+		t.Fatalf("graph anomalies must not fail the run: %+v", rep.Errors)
+	}
+	if !graphChecks(rep)["dynamic_only"] {
+		t.Fatalf("no dynamic_only warning: %+v", rep.Warnings)
+	}
+}
+
+// A static function that never ran is a static_unused warning.
+func TestVerifyWithGraphStaticUnused(t *testing.T) {
+	events := []Event{
+		ev("main", EvEnter, "1", 1, 0),
+		ev("", EvExit, "1", 1, 5),
+	}
+	static := []StaticFunc{
+		{Name: "main", File: "/p/f.go", Line: 1},
+		{Name: "neverRan", File: "/p/f.go", Line: 9},
+	}
+
+	rep := VerifyWithGraph(events, static, 10)
+	if !rep.OK {
+		t.Fatalf("static_unused must not fail the run: %+v", rep.Errors)
+	}
+	if !graphChecks(rep)["static_unused"] {
+		t.Fatalf("no static_unused warning: %+v", rep.Warnings)
+	}
+}
+
+// A fully matched dynamic/static pair adds no graph warnings, and an empty
+// static list skips the join entirely.
+func TestVerifyWithGraphMatched(t *testing.T) {
+	events := []Event{
+		ev("main", EvEnter, "1", 1, 0),
+		ev("", EvExit, "1", 1, 5),
+	}
+	static := []StaticFunc{{Name: "main", File: "/p/f.go", Line: 1}}
+
+	rep := VerifyWithGraph(events, static, 10)
+	if !rep.OK {
+		t.Fatalf("unexpected errors: %+v", rep.Errors)
+	}
+	for _, w := range rep.Warnings {
+		if w.Check == "dynamic_only" || w.Check == "static_unused" {
+			t.Fatalf("unexpected graph warning: %+v", w)
+		}
+	}
+
+	if rep := VerifyWithGraph(events, nil, 10); len(rep.Warnings) != 0 {
+		t.Fatalf("empty static list should skip the join: %+v", rep.Warnings)
+	}
+}
+
+// Graph warnings are additive: a broken trace keeps OK=false and still gets the
+// coverage warnings appended.
+func TestVerifyWithGraphKeepsHardErrors(t *testing.T) {
+	events := []Event{
+		ev("a", EvEnter, "1", 7, 0),
+		ev("b", EvEnter, "1", 7, 1), // duplicate span
+	}
+	rep := VerifyWithGraph(events, []StaticFunc{{Name: "other", File: "/p/f.go", Line: 3}}, 10)
+	if rep.OK {
+		t.Fatal("expected the hard error to survive the graph join")
+	}
+	checks := graphChecks(rep)
+	if !checks["dynamic_only"] {
+		t.Fatalf("expected dynamic_only alongside the error: %+v", rep.Warnings)
 	}
 }

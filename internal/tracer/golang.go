@@ -39,6 +39,14 @@ func runGoCmd(fullCmd string, localOnly bool, onEvent func(Event)) error {
 			// instrumented standard library, so tracing is skipped rather than
 			// failing the user's build.
 			fmt.Fprintf(os.Stderr, "cadr: go tracing disabled for %s builds\n", bad)
+		} else if supported, reason := toolwrap.OverlaySupported(".", parts); !supported {
+			// -modfile cannot be used here (workspace mode / vendoring), so use
+			// the legacy per-package -toolexec path.
+			fmt.Fprintf(os.Stderr, "cadr: go tracing using -toolexec (%s)\n", reason)
+			if goEnv, ok := toolwrap.PrepareEnv("."); ok {
+				env = goEnv
+				parts = injectToolexec(parts)
+			}
 		} else if ob, ok := toolwrap.PrepareOverlay("."); ok {
 			// Preferred: one shared runtime module via -overlay, so span/seq are
 			// process-global and cross-package order is exact.

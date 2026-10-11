@@ -111,7 +111,7 @@ func traceUsage() {
 	fmt.Println("  --depth <n>       tree depth limit")
 	fmt.Println("  --window <n>      rows shown before truncating")
 	fmt.Println("  --strict          (verify) treat warnings as failures")
-	fmt.Println("  --graph           (summary) join against the static call graph")
+	fmt.Println("  --graph           (summary|verify) join against the static call graph")
 	fmt.Println("  --keep <n>        (clear) keep the newest n runs")
 	fmt.Println("  --all             (clear) delete every run (default)")
 	fmt.Println("  --yes             (clear) skip the confirmation prompt")
@@ -249,6 +249,9 @@ func traceVerify(args []string) {
 	f := parseTraceFlags(args)
 	run := loadRun(f.run)
 	rep := tracer.Verify(run.Events)
+	if f.graph {
+		rep = tracer.VerifyWithGraph(run.Events, staticFuncs("."), 10)
+	}
 
 	failed := !rep.OK || (f.strict && len(rep.Warnings) > 0)
 	if f.json {
@@ -603,8 +606,14 @@ func filterForest(forest *tracer.Forest, ctx string) *tracer.Forest {
 }
 
 // staticFuncs lists the project's static functions for the dynamic/static join.
+// A scan failure yields nil: the join is best-effort and must never turn a
+// failed analysis into a hard failure of the trace command.
 func staticFuncs(root string) []tracer.StaticFunc {
-	res := analyzer.Analyze(root)
+	res, err := analyzer.Analyze(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cadr trace: static join skipped: %v\n", err)
+		return nil
+	}
 	if res.Graph == nil {
 		return nil
 	}

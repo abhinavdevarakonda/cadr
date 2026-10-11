@@ -45,7 +45,11 @@ func runAPICmd(path string, globalMode bool) {
 		if len(endpoints) == 0 {
 			startGlobal = true
 		} else {
-			result := analyzer.Analyze(path)
+			result, err := analyzer.Analyze(path)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "cadr: %v\n", err)
+				os.Exit(2)
+			}
 			g = result.Graph
 		}
 	}

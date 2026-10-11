@@ -29,14 +29,18 @@ type ScanResult struct {
 	Directories []string
 }
 
-func Analyze(root string) Result {
+// Analyze scans root and builds its static graph. A missing or unreadable
+// path is reported as an error instead of panicking; the scan-limit and
+// too-many-files paths keep returning an empty graph with a nil error because
+// they are expected, recoverable outcomes rather than bugs in user input.
+func Analyze(root string) (Result, error) {
 	scan, err := Scan(root)
 	if err != nil {
 		if errors.Is(err, ErrScanLimitExceeded) {
 			fmt.Fprintln(os.Stderr, err.Error())
-			return Result{Root: root, Graph: graph.New()}
+			return Result{Root: root, Graph: graph.New()}, nil
 		}
-		panic(fmt.Sprintf("failed scan: %v", err))
+		return Result{Root: root, Graph: graph.New()}, fmt.Errorf("failed to scan %q: %w", root, err)
 	}
 
 	langs := lang.All()
@@ -47,7 +51,7 @@ func Analyze(root string) Result {
 	}
 	if totalSrc > 50000 {
 		fmt.Fprintf(os.Stderr, "cadr: skipping analysis — %d source files is too many (limit: 50000). Set up a .gitignore or use a project-specific directory.\n", totalSrc)
-		return Result{Root: root, Graph: graph.New()}
+		return Result{Root: root, Graph: graph.New()}, nil
 	}
 	if totalSrc > 5000 {
 		fmt.Fprintf(os.Stderr, "cadr: warning — analyzing %d source files, this may use a lot of memory\n", totalSrc)
@@ -75,7 +79,7 @@ func Analyze(root string) Result {
 	// fmt.Println("total symbols:", len(symbols), "total facts:", len(facts))
 	res := Build(scan, symbols, facts)
 	res.Root = root
-	return res
+	return res, nil
 }
 
 func Scan(root string) (*ScanResult, error) {

@@ -48,6 +48,15 @@ func hasEvent(events []traceEvent, fn, file string, line int) bool {
 	return false
 }
 
+func hasFn(events []traceEvent, fn string) bool {
+	for _, e := range events {
+		if e.Fn == fn {
+			return true
+		}
+	}
+	return false
+}
+
 func TestInstrumentedGoRun(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix socket transport test")
@@ -241,6 +250,71 @@ func captureEvents(t *testing.T, dir string, env []string, goArgs []string) []tr
 			t.Logf("captureEvents go %v out=%q got=%d", goArgs, string(out), len(got))
 			return got
 		}
+	}
+}
+
+// TestWorkspaceFallbackGoRun proves the workspace path: OverlaySupported
+// rejects -modfile under go.work, and the -toolexec fallback still instruments
+// a cross-module call chain.
+func TestWorkspaceFallbackGoRun(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket transport test")
+	}
+	if testing.Short() {
+		t.Skip("builds a Go workspace")
+	}
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain not available")
+	}
+	t.Setenv("GOWORK", "")
+
+	root := t.TempDir()
+	appDir := filepath.Join(root, "app")
+	libDir := filepath.Join(root, "lib")
+	if err := os.MkdirAll(appDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(libDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "go.work"), "go 1.26\n\nuse (\n\t./app\n\t./lib\n)\n")
+	writeFile(t, filepath.Join(appDir, "go.mod"), "module wsapp\n\ngo 1.26\n\nrequire wslib v0.0.0\n\nreplace wslib => ../lib\n")
+	writeFile(t, filepath.Join(appDir, "main.go"), "package main\n\nimport \"wslib\"\n\nfunc main() { lib.A() }\n")
+	writeFile(t, filepath.Join(libDir, "go.mod"), "module wslib\n\ngo 1.26\n")
+	writeFile(t, filepath.Join(libDir, "lib.go"), "package lib\n\nfunc A() { B() }\n\nfunc B() {}\n")
+
+	if ok, reason := OverlaySupported(root, []string{"go", "run", "."}); ok {
+		t.Fatalf("workspace module reported overlay-supported (reason=%q)", reason)
+	}
+
+	cacheBase := filepath.Join(os.TempDir(), "cadr-toolwrap-test-cache")
+	env, ok := prepareEnv(root, cacheBase)
+	if !ok {
+		t.Fatal("prepareEnv failed: go tracing disabled")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+
+	appFile := filepath.Join(appDir, "main.go")
+	libFile := filepath.Join(libDir, "lib.go")
+	if resolved, rerr := filepath.EvalSymlinks(appDir); rerr == nil {
+		appFile = filepath.Join(resolved, "main.go")
+	}
+	if resolved, rerr := filepath.EvalSymlinks(libDir); rerr == nil {
+		libFile = filepath.Join(resolved, "lib.go")
+	}
+
+	events := runTraced(t, appDir, env, ToolexecValue(exe))
+	if !hasEvent(events, "main", appFile, 5) {
+		t.Fatalf("missing main@%s:5; got %+v", appFile, events)
+	}
+	if !hasEvent(events, "A", libFile, 3) {
+		t.Fatalf("missing A@%s:3; got %+v", libFile, events)
+	}
+	if !hasEvent(events, "B", libFile, 5) {
+		t.Fatalf("missing B@%s:5; got %+v", libFile, events)
 	}
 }
 

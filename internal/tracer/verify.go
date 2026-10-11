@@ -127,7 +127,10 @@ func Verify(events []Event) *VerifyReport {
 				rep.addError(Violation{Check: "child_outside_parent", Detail: c.Event.Name, Fn: c.Event.Name, File: c.Event.File, Line: c.Event.Line})
 			}
 		}
-		if childSum > node.Dur {
+		// An open parent has Dur 0 (its exit has not arrived yet), so comparing
+		// its children against it is meaningless — open spans are reported as
+		// `open_span`/`incomplete` warnings instead.
+		if !node.Open && childSum > node.Dur {
 			rep.addError(Violation{Check: "child_time_exceeds_parent", Detail: fmt.Sprintf("children %dns > parent %dns", childSum, node.Dur), Fn: node.Event.Name, File: node.Event.File, Line: node.Event.Line})
 		}
 	})
@@ -138,6 +141,28 @@ func Verify(events []Event) *VerifyReport {
 	}
 	if rep.Counts.Enters != rep.Counts.Exits && hasSpan {
 		rep.addWarning(Violation{Check: "incomplete", Detail: fmt.Sprintf("%d enters, %d exits", rep.Counts.Enters, rep.Counts.Exits)})
+	}
+	return rep
+}
+
+// VerifyWithGraph runs Verify and folds the static↔dynamic graph anomalies into
+// the report as warnings. They describe coverage (functions that ran but are
+// absent from the static graph, and static functions that never ran), not trace
+// corruption, so OK is left untouched. static is the project's static function
+// list; an empty list skips the join. maxSamples bounds the listed
+// dynamic_only names (<=0 defaults to 10).
+func VerifyWithGraph(events []Event, static []StaticFunc, maxSamples int) *VerifyReport {
+	rep := Verify(events)
+	if len(static) == 0 {
+		return rep
+	}
+	sum := Summarize(events)
+	sum.AddGraphAnomalies(static, maxSamples)
+	for _, a := range sum.Anomalies {
+		if a.Kind != "dynamic_only" && a.Kind != "static_unused" {
+			continue
+		}
+		rep.addWarning(Violation{Check: a.Kind, Detail: a.Detail})
 	}
 	return rep
 }

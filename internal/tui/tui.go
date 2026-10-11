@@ -591,6 +591,178 @@ func (m *Model) treeBars(i int) string {
 	return strings.Join(parts, "")
 }
 
+// flowGroup is one display row in the Flow pane: the history indices start..end
+// that render together. start == end is a normal row; end > start is a run of
+// consecutive repeated sibling calls rendered as one collapsed row.
+type flowGroup struct {
+	start, end int
+}
+
+// flowGroups is the Flow pane's display-row model over m.history. A maximal run
+// of rows with the same Name, depth, parentIdx and context forms one group; a
+// run of two or more is collapsed (`worker ×3`), a singleton renders unchanged.
+// Grouping requires the same parentIdx, so look-alike calls under different
+// parents (`__read_lines` under two different `load_*` functions) stay separate,
+// and the same context, so a context switch (▸) is never hidden.
+func (m *Model) flowGroups() []flowGroup {
+	n := len(m.history)
+	groups := make([]flowGroup, 0, n)
+	for i := 0; i < n; {
+		j := i
+		for j+1 < n && m.sameFlowRow(i, j+1) {
+			j++
+		}
+		groups = append(groups, flowGroup{start: i, end: j})
+		i = j + 1
+	}
+	return groups
+}
+
+// sameFlowRow reports whether history rows i and j may collapse together.
+func (m *Model) sameFlowRow(i, j int) bool {
+	if i < 0 || j < 0 || i >= len(m.history) || j >= len(m.history) {
+		return false
+	}
+	if m.history[i].Name != m.history[j].Name {
+		return false
+	}
+	if m.depthAt(i) != m.depthAt(j) {
+		return false
+	}
+	if m.parentIdxAt(i) != m.parentIdxAt(j) {
+		return false
+	}
+	return m.ctxAt(i) == m.ctxAt(j)
+}
+
+func (m *Model) depthAt(i int) int {
+	if i >= 0 && i < len(m.depths) {
+		return m.depths[i]
+	}
+	return 0
+}
+
+func (m *Model) parentIdxAt(i int) int {
+	if i >= 0 && i < len(m.parentIdx) {
+		return m.parentIdx[i]
+	}
+	return -1
+}
+
+func (m *Model) ctxAt(i int) string {
+	if i >= 0 && i < len(m.ctxs) {
+		return m.ctxs[i]
+	}
+	return ""
+}
+
+// flowGroupIndex maps a history index to its display row. A stale or empty
+// playhead clamps to the first/last valid row instead of panicking.
+func flowGroupIndex(groups []flowGroup, playhead int) int {
+	if len(groups) == 0 {
+		return 0
+	}
+	if playhead < 0 {
+		return 0
+	}
+	for gi, g := range groups {
+		if playhead <= g.end {
+			return gi
+		}
+	}
+	return len(groups) - 1
+}
+
+// flowStep moves the playhead by delta **display rows** in the Flow pane. A
+// collapsed run of repeated calls is one row, so one keypress crosses it
+// instead of crawling through every hidden history index (the UI would not
+// change until the run ended). playhead lands on the target row's first
+// history index.
+func (m *Model) flowStep(delta int) {
+	groups := m.flowGroups()
+	if len(groups) == 0 {
+		return
+	}
+	cur := flowGroupIndex(groups, m.playhead)
+	next := cur + delta
+	if next < 0 {
+		next = 0
+	}
+	if next >= len(groups) {
+		next = len(groups) - 1
+	}
+	if next == cur {
+		return
+	}
+	m.playhead = groups[next].start
+	m.syncToHistory()
+}
+
+// renderFlowRow renders one display row: a single history row, or a collapsed
+// run (`name ×N [Σ total]`, heat from the run's max self-time, cursor when the
+// playhead is anywhere inside the run). Bars/connector come from the run's last
+// member so the collapse does not change sibling layout.
+func (m *Model) renderFlowRow(g flowGroup) string {
+	hit := m.history[g.start]
+	cursor := "  "
+	focused := m.playhead >= g.start && m.playhead <= g.end
+	if focused {
+		cursor = "> "
+	}
+	depth := m.depthAt(g.start)
+	isRoot := g.start < len(m.ctxRoots) && m.ctxRoots[g.start]
+	bars := m.treeBars(g.start)
+	conn := ""
+	if depth > 0 {
+		if m.rowLast(g.end) {
+			conn = "└─ "
+		} else {
+			conn = "├─ "
+		}
+	}
+	marker := ""
+	if isRoot {
+		marker = "▸ "
+	}
+	var self, total int64
+	for i := g.start; i <= g.end; i++ {
+		if s := m.selfNs[m.history[i].Span]; s > self {
+			self = s
+		}
+		total += m.durNs[m.history[i].Span]
+	}
+	nameStyle := funcStyle
+	switch {
+	case self >= 100*int64(time.Millisecond):
+		nameStyle = heatHigh
+	case self >= 20*int64(time.Millisecond):
+		nameStyle = heatMed
+	case self > 0:
+		nameStyle = heatLow
+	}
+	name := marker + nameStyle.Render(hit.Name)
+	if n := g.end - g.start + 1; n > 1 {
+		name += " " + faintStyle.Render(fmt.Sprintf("×%d", n))
+	}
+	if g.end > g.start {
+		if total > 0 {
+			name += " " + faintStyle.Render("[Σ "+fmtDurTUI(total)+"]")
+		}
+	} else if d := m.durNs[hit.Span]; d > 0 {
+		name += " " + faintStyle.Render("["+fmtDurTUI(d)+"]")
+	}
+	// The focused row also shows self-time (time in the function itself), which
+	// is what the heat colour encodes. For a run it is the run's max self-time.
+	if focused && self > 0 {
+		name += " " + faintStyle.Render("self "+fmtDurTUI(self))
+	}
+	line := fmt.Sprintf("%s#%d %s%s%s", cursor, g.start+1, bars, conn, name)
+	if focused {
+		line = glowStyle.Render(line)
+	}
+	return line
+}
+
 func fmtDurTUI(ns int64) string {
 	switch {
 	case ns < 1000:
@@ -716,10 +888,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			} else {
 				if m.rightMode == ModeFlow {
-					if len(m.history) > 0 && m.playhead < len(m.history)-1 {
-						m.playhead++
-						m.syncToHistory()
-					}
+					m.flowStep(1)
 				} else if m.rightMode == ModePreview {
 					m.previewScroll++
 				} else {
@@ -736,11 +905,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			} else {
 				if m.rightMode == ModeFlow {
-					if len(m.history) > 0 && m.playhead > 0 {
-						m.playhead--
-						m.isLive = false
-						m.syncToHistory()
-					}
+					m.isLive = false
+					m.flowStep(-1)
 				} else if m.rightMode == ModePreview {
 					if m.previewScroll > 0 {
 						m.previewScroll--
@@ -762,13 +928,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			} else {
 				if m.rightMode == ModeFlow {
-					if len(m.history) > 0 {
-						m.playhead += jump
-						if m.playhead >= len(m.history) {
-							m.playhead = len(m.history) - 1
-						}
-						m.syncToHistory()
-					}
+					m.flowStep(jump)
 				} else if m.rightMode == ModePreview {
 					m.previewScroll += jump
 				} else {
@@ -787,14 +947,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.previewScroll = 0
 			} else {
 				if m.rightMode == ModeFlow {
-					if len(m.history) > 0 {
-						m.playhead -= jump
-						if m.playhead < 0 {
-							m.playhead = 0
-						}
-						m.isLive = false
-						m.syncToHistory()
-					}
+					m.isLive = false
+					m.flowStep(-jump)
 				} else if m.rightMode == ModePreview {
 					m.previewScroll -= jump
 					if m.previewScroll < 0 {
@@ -1010,13 +1164,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.isLive = !m.isLive
 			}
 		case "H":
-			if len(m.history) > 0 && m.playhead > 0 {
+			if m.rightMode == ModeFlow {
+				m.isLive = false
+				m.flowStep(-1)
+			} else if len(m.history) > 0 && m.playhead > 0 {
 				m.playhead--
 				m.isLive = false
 				m.syncToHistory()
 			}
 		case "L":
-			if len(m.history) > 0 && m.playhead < len(m.history)-1 {
+			if m.rightMode == ModeFlow {
+				m.flowStep(1)
+			} else if len(m.history) > 0 && m.playhead < len(m.history)-1 {
 				m.playhead++
 				m.syncToHistory()
 			}
@@ -1313,76 +1472,37 @@ func (m Model) View() string {
 		previewLines := m.renderPreview(rightContentWidth, paneHeight-4)
 		rightLines = append(rightLines, previewLines...)
 	} else if m.rightMode == ModeFlow {
+		groups := m.flowGroups()
 		visibleCount := paneHeight - 4
-
-		// 1. Maintain camera tracking bounds
-		if m.playhead < m.rightScroll {
-			m.rightScroll = m.playhead
-		} else if m.playhead >= m.rightScroll+visibleCount {
-			m.rightScroll = m.playhead - visibleCount + 1
+		if visibleCount < 1 {
+			visibleCount = 1
 		}
 
-		// 2. Bound checks
+		// Camera tracks the playhead's display row (a collapsed group counts
+		// as one row), not the raw history index.
+		cur := flowGroupIndex(groups, m.playhead)
+		if cur < m.rightScroll {
+			m.rightScroll = cur
+		} else if cur >= m.rightScroll+visibleCount {
+			m.rightScroll = cur - visibleCount + 1
+		}
 		if m.rightScroll < 0 {
 			m.rightScroll = 0
 		}
-
-		endHit := m.rightScroll + visibleCount
-		if endHit > len(m.history) {
-			endHit = len(m.history)
+		maxScroll := len(groups) - visibleCount
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		if m.rightScroll > maxScroll {
+			m.rightScroll = maxScroll
 		}
 
-		for i := m.rightScroll; i < endHit; i++ {
-			hit := m.history[i]
-			cursor := "  "
-			if i == m.playhead {
-				cursor = "> "
-			}
-			depth := 0
-			if i < len(m.depths) {
-				depth = m.depths[i]
-			}
-			isRoot := i < len(m.ctxRoots) && m.ctxRoots[i]
-			bars := m.treeBars(i)
-			conn := ""
-			if depth > 0 {
-				if m.rowLast(i) {
-					conn = "└─ "
-				} else {
-					conn = "├─ "
-				}
-			}
-			marker := ""
-			if isRoot {
-				marker = "▸ "
-			}
-			// Heat by self-time: time spent in the function excluding children.
-			self := m.selfNs[hit.Span]
-			nameStyle := funcStyle
-			switch {
-			case self >= 100*int64(time.Millisecond):
-				nameStyle = heatHigh
-			case self >= 20*int64(time.Millisecond):
-				nameStyle = heatMed
-			case self > 0:
-				nameStyle = heatLow
-			}
-			name := marker + nameStyle.Render(hit.Name)
-			if d := m.durNs[hit.Span]; d > 0 {
-				name += " " + faintStyle.Render("["+fmtDurTUI(d)+"]")
-				// The focused row also shows self-time (time in the function
-				// itself), which is what the heat colour encodes.
-				if i == m.playhead {
-					if s := m.selfNs[hit.Span]; s > 0 {
-						name += " " + faintStyle.Render("self "+fmtDurTUI(s))
-					}
-				}
-			}
-			line := fmt.Sprintf("%s#%d %s%s%s", cursor, i+1, bars, conn, name)
-			if i == m.playhead {
-				line = glowStyle.Render(line)
-			}
-			rightLines = append(rightLines, clipStyle.Render(line))
+		end := m.rightScroll + visibleCount
+		if end > len(groups) {
+			end = len(groups)
+		}
+		for gi := m.rightScroll; gi < end; gi++ {
+			rightLines = append(rightLines, clipStyle.Render(m.renderFlowRow(groups[gi])))
 		}
 	} else if len(m.rightItems) > 0 {
 		for i := 0; i < len(m.rightItems); i++ {

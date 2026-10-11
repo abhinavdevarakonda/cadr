@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/abhinavdevarakonda/cadr/internal/graph"
@@ -87,6 +88,130 @@ func TestApplyTraceEventLastChild(t *testing.T) {
 	}
 	if !m.rowLast(5) {
 		t.Fatalf("b2 should be last")
+	}
+}
+
+// TestFlowGroupsCollapseSiblings locks the always-on repeat-collapse rule:
+// consecutive identical siblings under one parent render as a single row.
+func TestFlowGroupsCollapseSiblings(t *testing.T) {
+	m := newTestModel(t)
+	enter := func(fn string, span, ts int64) tracer.Event {
+		return tracer.Event{Name: fn, Ev: tracer.EvEnter, Ctx: "1", Span: span, TS: ts}
+	}
+	m.applyTraceEvent(enter("root", 1, 0))
+	m.applyTraceEvent(enter("worker", 2, 1))
+	m.applyTraceEvent(tracer.Event{Ev: tracer.EvExit, Ctx: "1", Span: 2, TS: 2})
+	m.applyTraceEvent(enter("worker", 3, 3))
+	m.applyTraceEvent(tracer.Event{Ev: tracer.EvExit, Ctx: "1", Span: 3, TS: 4})
+	m.applyTraceEvent(enter("worker", 4, 5))
+	m.applyTraceEvent(tracer.Event{Ev: tracer.EvExit, Ctx: "1", Span: 4, TS: 6})
+
+	groups := m.flowGroups()
+	if len(groups) != 2 {
+		t.Fatalf("groups = %+v, want root + one collapsed run", groups)
+	}
+	if groups[0].start != 0 || groups[0].end != 0 {
+		t.Fatalf("root group = %+v", groups[0])
+	}
+	if groups[1].start != 1 || groups[1].end != 3 {
+		t.Fatalf("worker run = %+v, want {1 3}", groups[1])
+	}
+
+	// A playhead anywhere inside the run maps to the collapsed row.
+	if got := flowGroupIndex(groups, 2); got != 1 {
+		t.Fatalf("flowGroupIndex(playhead=2) = %d, want 1", got)
+	}
+
+	m.playhead = 2
+	line := m.renderFlowRow(groups[1])
+	if !strings.Contains(line, "> #2 ") {
+		t.Fatalf("focused collapsed row = %q", line)
+	}
+	if !strings.Contains(line, "×3") {
+		t.Fatalf("collapsed row missing count: %q", line)
+	}
+}
+
+// TestFlowStepSkipsCollapsedRun is the scroll fix: one keypress moves the
+// playhead to the next/previous display row, so it crosses a collapsed run of
+// repeated calls instead of crawling through every hidden history index.
+func TestFlowStepSkipsCollapsedRun(t *testing.T) {
+	m := newTestModel(t)
+	enter := func(fn string, span, ts int64) tracer.Event {
+		return tracer.Event{Name: fn, Ev: tracer.EvEnter, Ctx: "1", Span: span, TS: ts}
+	}
+	m.applyTraceEvent(enter("root", 1, 0))
+	for i, span := range []int64{2, 3, 4} {
+		ts := int64(1 + i*2)
+		m.applyTraceEvent(enter("worker", span, ts))
+		m.applyTraceEvent(tracer.Event{Ev: tracer.EvExit, Ctx: "1", Span: span, TS: ts + 1})
+	}
+	m.applyTraceEvent(enter("tail", 5, 20))
+
+	groups := m.flowGroups()
+	if len(groups) != 3 || groups[1].end-groups[1].start+1 != 3 {
+		t.Fatalf("groups = %+v", groups)
+	}
+
+	m.playhead = 0
+	m.flowStep(1)
+	if m.playhead != 1 {
+		t.Fatalf("first step: playhead = %d, want 1", m.playhead)
+	}
+	m.flowStep(1)
+	if m.playhead != 4 {
+		t.Fatalf("step over collapsed run: playhead = %d, want 4", m.playhead)
+	}
+	m.flowStep(-1)
+	if m.playhead != 1 {
+		t.Fatalf("step back over collapsed run: playhead = %d, want 1", m.playhead)
+	}
+
+	// Starting inside the run still steps out in one keypress.
+	m.playhead = 2
+	m.flowStep(1)
+	if m.playhead != 4 {
+		t.Fatalf("step from inside run: playhead = %d, want 4", m.playhead)
+	}
+}
+
+// TestFlowGroupsKeepDistinct guards the contract that only same-parent repeats
+// collapse: __read_lines under two different load_* parents must stay separate.
+func TestFlowGroupsKeepDistinct(t *testing.T) {
+	m := newTestModel(t)
+	m.applyTraceEvent(tracer.Event{Name: "load_books", Ev: tracer.EvEnter, Ctx: "1", Span: 1, TS: 0})
+	m.applyTraceEvent(tracer.Event{Name: "__read_lines", Ev: tracer.EvEnter, Ctx: "1", Span: 2, TS: 1})
+	m.applyTraceEvent(tracer.Event{Ev: tracer.EvExit, Ctx: "1", Span: 2, TS: 2})
+	m.applyTraceEvent(tracer.Event{Ev: tracer.EvExit, Ctx: "1", Span: 1, TS: 3})
+	m.applyTraceEvent(tracer.Event{Name: "load_authors", Ev: tracer.EvEnter, Ctx: "1", Span: 3, TS: 4})
+	m.applyTraceEvent(tracer.Event{Name: "__read_lines", Ev: tracer.EvEnter, Ctx: "1", Span: 4, TS: 5})
+
+	if len(m.history) != 4 {
+		t.Fatalf("history = %d rows, want 4", len(m.history))
+	}
+	if m.parentIdx[1] == m.parentIdx[3] {
+		t.Fatalf("fixture is wrong: __read_lines rows share a parent")
+	}
+	if m.sameFlowRow(1, 3) {
+		t.Fatal("look-alike calls under different parents must not collapse")
+	}
+	for _, g := range m.flowGroups() {
+		if g.end != g.start {
+			t.Fatalf("unexpected collapsed group %+v", g)
+		}
+	}
+}
+
+// Distinct contexts must stay visible even when the root function name repeats,
+// so the ▸ context-switch marker is never hidden.
+func TestFlowGroupsKeepContextSwitch(t *testing.T) {
+	m := newTestModel(t)
+	m.applyTraceEvent(tracer.Event{Name: "main", Ev: tracer.EvEnter, Ctx: "1", Span: 1, TS: 0})
+	m.applyTraceEvent(tracer.Event{Name: "main", Ev: tracer.EvEnter, Ctx: "2", Span: 2, TS: 1})
+	for _, g := range m.flowGroups() {
+		if g.end != g.start {
+			t.Fatalf("context roots collapsed across a switch: %+v", g)
+		}
 	}
 }
 
