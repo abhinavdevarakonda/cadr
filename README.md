@@ -16,116 +16,213 @@
 <hr />
 
 <p align="center">
-  <!-- <video src="https://github.com/user-attachments/assets/7d523ad0-d2a6-403e-a879-e9f3cd1344e0" width="850" autoplay loop muted></video> -->
   <img src="./assets/cadr-demo.gif" width="850" alt="cadr demo" />
 </p>
 
-cadr shows you a real-time map of your codebase's execution flow directly in the terminal. Explore complex application logic and legacy codebases without relying on manual logs, or "KT's" if you're using it at work :p
+cadr displays a real-time map of your codebase's execution flow directly in the terminal. Explore complex architectures, follow execution paths during runtime, evaluate caller/callee dependencies, and execute API requests without manual logging or cloud APM agents.
 
-cadr has three primary systems:
-1. **Static Analyzer (TreeSitter)**: Parses the project directories to build a weighted structural dependencies graph.
-2. **Dynamic Tracer**: Uses `PYTHONPATH` or `NODE_OPTIONS` injection to hook into target applications, transmitting TCP payloads of your service line-by-line back to the cadr daemon. Native support for multi-threading, multi-processing, and web subprocesses (Flask, Uvicorn, Express, NestJS).
-3. **Interactive TUI**: Sticks and follows to the live execution feed, providing a TUI for navigating execution paths chronologically or structurally in a way vim users can appreciate.
+---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Command Cheat Sheet](#command-cheat-sheet)
+- [TUI Controls & Navigation](#tui-controls--navigation)
+- [Language Support](#language-support)
+- [cadr api (API Explorer)](#cadr-api-api-explorer)
+- [cadr MCP Server (AI Agents)](#cadr-mcp-server-ai-agents)
+- [Known Limitations](#known-limitations)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+## Overview
+
+cadr combines three systems into one terminal workspace:
+
+1. **Static Analysis Engine (Tree-sitter):** Parses your codebase into an in-memory directed graph of files, directories, functions, and endpoints. Resolves callers and callees without having to compile.
+2. **Dynamic Tracing Engine:** Injects zero-dependency runtime probes into the codebase, capturing function entries and exits along with their durations over local IPC (UDS) sockets.
+    *(Python/Go: entries, exits, durations; JavaScript: entries only)*
+3. **Interactive TUI:** A dual-pane terminal interface that maps live runtime events onto the static codebase tree, rendering traffic heatmaps, chronological function calls, and dependency trees.
 
 ---
 
 ## Installation
 
-### linux/macOS
+### Pre-built Binary (Linux / macOS)
+Download the latest pre-compiled binary for your architecture from [GitHub Releases](https://github.com/abhinavdevarakonda/cadr/releases).
 
-#### Download Binary
-Download latest binary from [Github Releases.](https://github.com/abhinavdevarakonda/cadr/releases) 
-
-#### go install
+### Go Install
 ```bash
 go install github.com/abhinavdevarakonda/cadr/cmd/cadr@latest
 ```
 
-#### Build from Source
-> Requires a C compiler due to CGO (treesitter)
+<details>
+<summary><b>Build from Source (Linux / macOS)</b></summary>
+
+Requires Go 1.22+ and a C compiler (`gcc` or `clang`) for Tree-sitter CGO bindings:
+
 ```bash
-git clone https://github.com/abhinavdevarakonda/cadr
+git clone https://github.com/abhinavdevarakonda/cadr.git
 cd cadr
 go build -o cadr ./cmd/cadr
-sudo mv cadr /usr/local/bin/ # Add to PATH
+sudo mv cadr /usr/local/bin/
 ```
+</details>
 
-### Windows
+<details>
+<summary><b>Windows Setup</b></summary>
 
-#### WSL (Recommended)
-Follow the Linux instructions inside your WSL terminal.
+**WSL (Recommended):**
+Follow the Linux installation steps inside your WSL terminal.
 
-#### Native PowerShell
-1. **Prerequisite:** Install a C compiler (e.g., `scoop install gcc` or `choco install mingw`).
-2. **Install:**
-```powershell
-go install github.com/abhinavdevarakonda/cadr/cmd/cadr@latest
-```
-*Note: the TUI would look cleaner and more consistent if using Windows Terminal.*
+**Native PowerShell:**
+1. Install a C compiler (e.g., `scoop install gcc` or `choco install mingw`).
+2. Run `go install github.com/abhinavdevarakonda/cadr/cmd/cadr@latest`.
+3. For the cleanest rendering, run cadr inside *Windows Terminal*.
+</details>
 
 ---
 
-## Getting Started
-> Note: cadr currently provides full dynamic execution tracing for Python and JavaScript/TypeScript. Static analysis and project navigation are supported for Python, Go, C, and JavaScript/TypeScript. Additional languages will be added soon! (I just deal with those more than others, so I had to add them first.)
+## Quick Start
 
-cadr operates in a dual-pane workflow. The left pane shows you the structure, while the right pane shows what's running and its relationships, tracing the flow the codebase takes during runtime.
-
-**1. Start the cadr Daemon**:
+### 1. Launch the Live TUI
+In your repository root:
 ```bash
-# Analyze the current directory and start the TUI
-# Just 'cadr' is enough if you want the TUI to start in the working directory
-cadr .
+cadr . 
 ```
+The left pane renders your codebase structure. The right pane listens for incoming trace events, as well as some static information like callers and callees.
 
-**2. Execute Your Application**:
+### 2. Run and Trace an Application
+In a separate terminal (or background process):
 ```bash
-# cadr will inject the environment variables and execute the process
 cadr run "python app.py"
+# or
+cadr run "go run ."
+# or
+cadr run "node server.js"
 ```
-*(you can substitute `python app.py` based on your framework; `node app.js`, `npm start`, `flask run`, `uvicorn main:app`, `pytest`, etc.)*
+cadr injects runtime environment hooks, executes the target command, and streams function call events directly to the active TUI.
 
-### Other Quick Tools (WIP)
-> cadr will show the whole codebase structure through [cytoscape.js](https://js.cytoscape.org/) at `localhost:6433`
+### 3. Record Traces for Offline Inspection
 ```bash
-cadr serve .
+cadr rec "pytest"
+# or
+cadr rec "go test ./..."
+```
+Runs the command and saves structured trace events to `.cadr/traces/` for querying via `cadr trace` or MCP tools.
+
+---
+
+## Command Cheat Sheet
+
+```text
+cadr .                  Start the live TUI dashboard in the current directory
+cadr run "<cmd>"        Execute and live-stream traces to the cadr TUI
+cadr rec "<cmd>"        Execute and record trace session to .cadr/traces/
+cadr api                Launch the terminal API Explorer
+cadr mcp                Start the Model Context Protocol (MCP) server over stdio
+cadr trace list         List all recorded trace runs
+cadr trace summary      Display function execution metrics (count, total, self time)
+cadr trace tree         Print the nested execution call tree of the last run
+cadr trace diff         Compare execution differences between two runs
+cadr trace context
+cadr trace verify       validate a run's internal stream invariants (--graph also joins against the static graph).
+cadr trace clear        Delete recorded trace runs
+cadr serve .            Start the local web graph visualizer (localhost:6433)
 ```
 
 ---
 
-## Technical Features
+## TUI Controls & Navigation
 
-### Real-time Trace Visualization (`cadr`)
-As the process executes, cadr maps the incoming trace payloads onto the pre-made static graph:
-- **Heatmap**: Nodes in the structure tree visually scale based on execution frequency (function hit counts).
-- **Chronological Playhead**: The right-hand pane records a linear sequence of execution events.
-- **Dynamic Unrolling**: The structural tree (left pane) will automatically jump through directories to focus on active function/section in the real time trace execution.
-- **Fallback Navigation**: if your app executes dynamically generated code like a Jinja2 template that cadr's static graph can't find, it will still capture the exact file and line number so you can instantly open it in your editor by just hitting enter on the function.
+cadr uses standard Vim keybindings for navigation (`j/k` up and down, `h/l` expand and collapse, `/` fuzzy search).
 
-### Advanced TUI Controls
-cadr uses standard Vim keybindings (`j/k/h/l`, `gg/G`, `/` for fuzzy search, `ctrl+j/k` for jumps).
+Core controls:
+- `Tab` / `t`: Cycle right pane between **Flow** (chronological events), **Impact** (callers), and **Trace** (callees).
+- `Space`: Pause or resume real-time trace streaming.
+- `f`: Toggle Follow Live (keeps the tree focused on active functions or lets you browse freely).
+- `Enter`: Open the selected file, directory, or function directly in your `$EDITOR` at that exact line.
+- `H` / `L`: Scrub backward and forward through the execution history.
+- `c`: Collapse all folders to the root. Press again to restore previous expansion state.
+- `a`: Acknowledge file changes in the diff view.
 
-These are the cadr-specific bindings:
+<details>
+<summary><b>Complete Keybindings Table</b></summary>
 
-| Key | Action |
-| :--- | :--- |
-| `i` | Toggle focus between the Left (Structure) and Right (Trace/Impact) panes. |
-| `c` | **State Toggle**: Collapse the entire tree to the root. Press again to restore your previous exact folder state. |
-| `enter` | Open the selected directory/file/function in your `$EDITOR` precisely at that line number. |
-| `f` | Toggle **Follow Live**: Stops the left pane from auto-scrolling through the real-time function calls so you can inspect code while the app runs. |
-| `Space` | Toggle **Live/Pause**: Pause the UI to inspect a specific moment in the trace without losing data. Press again to unpause and go back to current execution calls. |
-| (shift+) `H` / `L` | scrub backwards or forwards through the chronological trace history. |
-| `t` / 'Tab' | Cycle right pane between **Flow** (sequence), **Impact** (callers), and **Trace** (callees). |
+| Key | Context | Action |
+| :--- | :--- | :--- |
+| `j` / `k` | Tree / Lists | Move selection down / up |
+| `h` / `l` | Left Pane | Collapse folder / expand folder |
+| `i` | Global | Switch focus between Left (Structure) and Right (Inspection) panes |
+| `Enter` | Selection | Open file or function in `$EDITOR` at declaration line |
+| `Tab` / `t` | Right Pane | Cycle view: Flow -> Impact -> Trace |
+| `Space` | Global | Pause / unpause live trace stream |
+| `f` | Global | Toggle auto-follow for active execution nodes |
+| `c` | Left Pane | Toggle collapse all / restore folder expansion |
+| `H` / `L` | Right Pane | Step backward / forward through execution playhead |
+| `a` | Diffs | Acknowledge selected file diff |
+| `A` | Diffs | Acknowledge all file diffs |
+| `/` | Global | Fuzzy search symbols and files |
+| `q` / `Ctrl+c` | Global | Exit cadr |
 
+</details>
 
 ---
 
-## cadr MCP Server
+## Language Support
 
-cadr exposes its static graph and dynamic analysis tools as an **MCP** server. This allows AI assistants (like Claude, Cursor, or Antigravity) to see your code structure and follow execution flows without manual grepping.
+- **Python**
+  - Static Graph: Definitions, calls, classes, and decorators.
+  - Dynamic Tracing: Function entry and exit, execution durations, formal argument capture via `sys.settrace`.
+  - Frameworks: FastAPI and Flask route and parameter extraction.
+- **Go**
+  - Static Graph: Functions, struct methods, interfaces, and cross-package calls.
+  - Dynamic Tracing: Process-wide tracking via `-overlay` / `-toolexec` compiler toolchain interception.
+  - Frameworks: Gin (`gin-gonic/gin`) route groups, parameters, and handler mapping.
+- **JavaScript / TypeScript**
+  - Static Graph: Function declarations, arrow functions, class methods.
+  - Dynamic Tracing: entry-only call events via NODE_OPTIONS (regex source instrumentation; no durations/call tree yet).
+- **C / C++**
+  - Static Graph: Functions, declarations, and call references.
+  - Dynamic Tracing: In roadmap (`-finstrument-functions`).
 
-### Setup
-Add cadr to your agent's MCP configuration (e.g., `claude_desktop_config.json`). 
-> Different MCP clients use different configuration formats for registering servers, so refer to your client's documentation if needed. This one below works for Antigravity.
+---
+
+## cadr api (API Explorer)
+
+<p align="center">
+  <img src="assets/cadr-api-demo.gif" alt="cadr api explorer demo" />
+</p>
+
+`cadr api` provides a terminal-native API client that inspects your codebase to discover routes, maps underlying handler functions, and executes HTTP requests.
+
+Launch with:
+```bash
+cadr api
+```
+
+Key features:
+- **Automatic Route Discovery:** Statically scans Gin, FastAPI, and Flask routes without running the server.
+- **Path and Query Parameter Handling:** Automatically substitutes path parameters (`:id`, `{user_id}`, `<int:id>`) from inputs.
+- **Persistent Input Caching:** Headers, parameters, and request body payloads are saved per-endpoint in `.cadr/cache/api_cache.json`.
+- **Side-by-Side Call Graph:** Inspect the exact backend function call tree alongside the raw HTTP response.
+- **Send and Copy:** `Ctrl+s` sends the request. `y` copies the response payload to your system clipboard.
+
+For full details, see the [API Explorer Guide](docs/api-explorer.md).
+
+---
+
+## cadr MCP Server (AI Agents)
+
+cadr runs as a Model Context Protocol (MCP) server, giving AI coding assistants (Claude Desktop, Cursor, Antigravity, Windsurf) direct access to static graph queries and dynamic execution traces.
+
+Add cadr to your client configuration (e.g. `claude_desktop_config.json`):
+
 ```json
 {
   "mcpServers": {
@@ -137,30 +234,41 @@ Add cadr to your agent's MCP configuration (e.g., `claude_desktop_config.json`).
 }
 ```
 
-### MCP Tools
-cadr provides the AI with 12 tools to understand code deeply, these are just a few of them:
-- **`call_path`**: Find a call path between two functions
-- **`impact_analysis`**: Transitively find all functions affected if this function changes
-- **`get_last_trace`**: Read the last recorded trace from `.cadr/last_run.jsonl` (created by `cadr rec`). Returns function calls with parameters.
-- **`run_trace`**: Run an arbitrary command and trace its function calls dynamically in the background
+Core tools exposed to AI agents:
+- `find_symbol`: Resolve functions and methods into qualified graph identifiers.
+- `impact_analysis`: Calculate transitive blast radius (all callers affected by a change).
+- `trace_calls`: Map the complete downstream call tree of a function.
+- `get_node_source`: Read exact function source boundaries without reading entire files.
+- `run_trace` / `get_last_trace`: Execute tests and read runtime parameters.
+
+For the full 17-tool reference and agent prompts, see the [MCP Server Guide](docs/mcp.md).
 
 ---
 
-## cadr api (API Explorer)
+## Known Limitations
 
+- **JavaScript coverage**: regex-based CJS instrumentation; ESM, eval/new Function, and expression-body arrows
+   are not traced; no exit events/durations.
+- **Go Standalone Binaries:** `cadr run` instruments execution verbs (`go run`, `go test`). Standalone `go build` invocations are deliberately uninstrumented so production release binaries remain untouched.
+- **Docker and Remote Containers:** When running target applications inside containers or remote environments, specify `--tcp` mode instead of Unix Domain Sockets so the tracer can route events over network interfaces.
 
-# cadr API Explorer (`cadr api`)
+---
 
-cadr includes a terminal-native API Explorer to discover, navigate, and execute HTTP requests for your project's endpoints:
+## Documentation
 
-<p align="center">
-  <img src="assets/cadr-api-demo.gif" alt="cadr api explorer demo" />
-</p>
+- [CLI Trace Reference](docs/trace-cli.md) — Subcommands, queries, diffing, and JSON schemas.
+- [MCP Server Guide](docs/mcp.md) — AI agent configuration, tool definitions, and prompts.
+- [API Explorer Guide](docs/api-explorer.md) — Framework route extraction, parameters, and controls.
+- [Contributing Guide](CONTRIBUTING.md) — Architecture, subsystem responsibilities, and extension recipes.
 
-```bash
-# Start the API Explorer
-cadr api
-```
+---
 
-For detailed keybindings, request customization, and usage, see the [API Explorer Guide](docs/api_explorer.md).
+## Contributing
 
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on codebase structure, development setup, and pull request guidelines.
+
+---
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.
