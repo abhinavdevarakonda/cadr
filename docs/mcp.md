@@ -2,7 +2,7 @@
 
 cadr exposes its static dependency graph, AST index, and dynamic execution traces via the Model Context Protocol (MCP).
 
-This allows AI coding agents (Claude Desktop, Cursor, Antigravity, Windsurf) to query exact symbol definitions, compute call hierarchies, perform impact blast-radius calculations, and inspect ground-truth runtime parameters over standard JSON-RPC.
+This allows AI coding agents (Claude Desktop, Cursor, Antigravity, Windsurf) to query exact symbol definitions, compute call hierarchies, perform impact blast-radius calculations, and read recorded execution traces over standard JSON-RPC.
 
 ---
 
@@ -63,13 +63,32 @@ cadr exposes 17 tools grouped into three operational categories:
 - `call_path`: Find the shortest call path between two functions (e.g. `api.handler -> auth.verify -> db.query`).
 
 ### 3. Dynamic Tracing & Verification
-- `run_trace`: Execute an arbitrary test or run command in the background and return function hit summaries and exit codes.
-- `get_last_trace`: Retrieve the most recent trace recorded by `cadr rec`. Returns execution counts, total times, and runtime arguments.
-- `trace_runs`: List all stored trace runs in `.cadr/traces/`.
-- `trace_summary`: Return aggregated invocation counts, total duration, and self-time for a run.
-- `trace_tree`: Return the nested execution call tree of a run.
-- `trace_diff`: Return the behavioral and latency delta between two recorded runs.
-- `trace_verify`: Assert whether a recorded run matches expected call chains and AST nodes.
+
+Runs are recorded with `cadr rec "<command>"` in a shell; the MCP server never executes commands. Read a run in three tiers, never as one dump:
+
+**Digest → index → drill.** `trace_summary` (~30 lines: what ran, how slow, what failed), then `trace_context` (one line per request, hottest first, labelled with its HTTP route), then `trace_tree` scoped by `ctx=<id>`, `fn=<name>` or `route=<label>`. A whole-run tree of a busy server is thousands of interleaved rows and is refused by default.
+
+- `get_last_trace`: The most recent run. Alias of `trace_summary(run="last")` — prints the run id, joins the static graph, and includes errors.
+- `trace_runs`: List all stored runs in `.cadr/traces/runs/` (id, start time, duration, exit code, events, error count).
+- `trace_summary`: Aggregated counts, total duration, self time and source location per function, plus `errors:`, `warnings:` and `trace anomalies:` sections.
+- `trace_context`: Execution contexts (goroutine/thread/task) of a run — the request index.
+- `trace_tree`: Indented call tree, scoped by `ctx`, `fn` or `route`.
+- `trace_diff`: Behavioral and latency delta between two recorded runs, including the first divergence.
+- `trace_verify`: Assert whether a run's internal invariants hold (span pairing, timing, seq integrity) plus the recorded errors.
+
+### Machine-readable output
+
+Every trace tool returns both a text rendering (what the model reads) and a
+`structuredContent` envelope with the same numbers: `run_id`, `cmd`, `exit_code`,
+`complete`, `wall_ns`, `trace_ns`, `events` / `enter` / `exit`, `errors`, and the
+`full_run_file` path. `trace_summary` also carries the per-function `functions` array plus
+`warnings` / `anomalies`; `trace_context` carries the `contexts` array; `trace_tree` carries the
+`scope` it covers; `trace_verify` carries `ok` / `counts` / `violations`; `trace_diff` carries the
+full diff object. Nothing has to be parsed out of padded columns.
+
+### Errors are first-class
+
+A panic or uncaught exception is recovered from the run's stderr, localized to a `file:line`, stored in `runs/<id>.errors.json`, and reported by every trace tool. A crashed run can no longer look healthy: in the TUI the failing function turns red with a `✗`, and `cadr trace summary` prints an `errors:` section.
 
 ---
 
@@ -82,7 +101,7 @@ When asking an AI agent to inspect or modify code, prompt it to leverage cadr:
 2. **Assess Blast Radius Before Editing:**
    "Run impact_analysis on handlers.JoinQueue to see all higher-level routes or services that could break if we change its signature."
 3. **Verify Runtime Execution:**
-   "Run `run_trace` with `go test ./handlers/...` and verify which database calls were executed."
+   "Record a run with `cadr rec \"go test ./handlers/...\"`, call `trace_summary` to see whether it failed and where, then `trace_tree(ctx=<id>)` or `trace_tree(fn=<name>)` for the path."
 
 ---
 

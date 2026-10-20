@@ -3,7 +3,6 @@ package tracer
 import (
 	"bufio"
 	"crypto/md5"
-	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -116,23 +115,36 @@ func LoadConfig(root string) Config {
 }
 
 func Run(fullCmd string, onEvent func(Event)) error {
-	return runCmd(fullCmd, "", false, onEvent)
+	return RunCommand(fullCmd, RunOptions{OnEvent: onEvent})
 }
 
 func RunLocal(fullCmd string, onEvent func(Event)) error {
-	return runCmd(fullCmd, "", true, onEvent)
+	return RunCommand(fullCmd, RunOptions{OnEvent: onEvent, LocalOnly: true})
 }
 
 func RunWithLang(fullCmd string, langOverride string, onEvent func(Event)) error {
-	return runCmd(fullCmd, langOverride, false, onEvent)
+	return RunCommand(fullCmd, RunOptions{OnEvent: onEvent, LangOverride: langOverride})
 }
 
 func RunLocalWithLang(fullCmd string, langOverride string, onEvent func(Event)) error {
-	return runCmd(fullCmd, langOverride, true, onEvent)
+	return RunCommand(fullCmd, RunOptions{OnEvent: onEvent, LangOverride: langOverride, LocalOnly: true})
 }
 
-func runCmd(fullCmd string, langOverride string, localOnly bool, onEvent func(Event)) error {
-	lang := langOverride
+// RunOptions configures a traced run.
+type RunOptions struct {
+	LangOverride string
+	LocalOnly    bool
+	OnEvent      func(Event)
+	// OnDiagnostic receives every stderr line that is not a trace event: app
+	// output, log lines, panic traces. Optional; when nil those lines are
+	// forwarded to os.Stderr.
+	OnDiagnostic func(line string)
+}
+
+// RunCommand runs fullCmd under instrumentation, reporting trace events to
+// opts.OnEvent and every other stderr line to opts.OnDiagnostic.
+func RunCommand(fullCmd string, opts RunOptions) error {
+	lang := opts.LangOverride
 	if lang == "" {
 		lang = agents.DetectLanguage(fullCmd)
 	}
@@ -141,7 +153,7 @@ func runCmd(fullCmd string, langOverride string, localOnly bool, onEvent func(Ev
 	}
 
 	if lang == "go" {
-		return runGoCmd(fullCmd, localOnly, onEvent)
+		return runGoCmd(fullCmd, opts)
 	}
 
 	agent, ok := agents.Get(lang)
@@ -158,7 +170,7 @@ func runCmd(fullCmd string, langOverride string, localOnly bool, onEvent func(Ev
 
 	cmd.Env = os.Environ()
 
-	if localOnly {
+	if opts.LocalOnly {
 		cmd.Env = append(cmd.Env, "CADR_LOCAL_ONLY=1")
 	}
 
@@ -224,14 +236,21 @@ func runCmd(fullCmd string, langOverride string, localOnly bool, onEvent func(Ev
 	}
 
 	scanner := bufio.NewScanner(stderr)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
-		var event Event
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			fmt.Fprintln(os.Stderr, line)
+		if e, ok := ParseEventLine([]byte(line)); ok {
+			if opts.OnEvent != nil {
+				opts.OnEvent(e)
+			}
 			continue
 		}
-		onEvent(event)
+		// Not a trace event: app output, a log line or a panic.
+		if opts.OnDiagnostic != nil {
+			opts.OnDiagnostic(line)
+			continue
+		}
+		fmt.Fprintln(os.Stderr, line)
 	}
 
 	return cmd.Wait()
@@ -294,9 +313,8 @@ func StartListenerWithConfig(cfg Config, onEvent func(Event)) (*Listener, error)
 				defer c.Close()
 				scanner := bufio.NewScanner(c)
 				for scanner.Scan() {
-					var event Event
-					if err := json.Unmarshal([]byte(scanner.Text()), &event); err == nil {
-						onEvent(event)
+					if e, ok := ParseEventLine([]byte(scanner.Text())); ok {
+						onEvent(e)
 					}
 				}
 			}(conn)

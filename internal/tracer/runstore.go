@@ -37,6 +37,10 @@ type RunMeta struct {
 	ExitCount  int    `json:"exit_count"`
 	Dropped    int    `json:"dropped"`
 	Complete   bool   `json:"complete"`
+	// ErrorCount and FirstError summarize the failures recovered from the child's
+	// stderr; the full list lives in runs/<id>.errors.json.
+	ErrorCount int    `json:"error_count,omitempty"`
+	FirstError string `json:"first_error,omitempty"`
 }
 
 // Run is a loaded run: manifest + events + summary.
@@ -45,13 +49,14 @@ type TraceRun struct {
 	Meta    RunMeta
 	Events  []Event
 	Summary *Summary
+	Errors  []TraceError
+	Stderr  []string
 }
 
 // RunStore owns the on-disk run history under <root>/.cadr/traces.
 type RunStore struct {
 	Root    string
 	RunsDir string
-	LastPtr string
 	Retain  int
 }
 
@@ -68,22 +73,53 @@ func NewRunStore(root string) *RunStore {
 	return &RunStore{
 		Root:    abs,
 		RunsDir: filepath.Join(traces, "runs"),
-		LastPtr: filepath.Join(traces, "last_run.jsonl"),
 		Retain:  DefaultRetention,
 	}
 }
 
-// Ensure creates the run directories.
+// Ensure creates the run directory.
 func (s *RunStore) Ensure() error {
-	if err := os.MkdirAll(s.RunsDir, 0755); err != nil {
-		return err
+	return os.MkdirAll(s.RunsDir, 0755)
+}
+
+// legacyLastPtr is the pre-v3 single-file trace location. Nothing writes it any
+// more; it is read once by adoptLegacyPointer so traces recorded by older
+// binaries stay visible.
+func (s *RunStore) legacyLastPtr() string {
+	return filepath.Join(filepath.Dir(s.RunsDir), "last_run.jsonl")
+}
+
+// adoptLegacyPointer imports a legacy traces/last_run.jsonl as an orphan run when
+// the run store has no entries, and returns the adopted id ("" when nothing was
+// adopted). The id is derived deterministically from the file's mtime so repeated
+// calls are idempotent, and it keeps the timestamp prefix so it sorts with the
+// other runs.
+func (s *RunStore) adoptLegacyPointer() string {
+	legacy := s.legacyLastPtr()
+	fi, err := os.Stat(legacy)
+	if err != nil || fi.Size() == 0 {
+		return ""
 	}
-	return os.MkdirAll(filepath.Dir(s.LastPtr), 0755)
+	data, err := os.ReadFile(legacy)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	if err := os.MkdirAll(s.RunsDir, 0755); err != nil {
+		return ""
+	}
+	id := fi.ModTime().UTC().Format("20060102T150405.000Z") + "-legacy"
+	if err := os.WriteFile(s.eventsPath(id), data, 0644); err != nil {
+		return ""
+	}
+	fmt.Fprintf(os.Stderr, "cadr: imported legacy trace %s as run %s\n", legacy, id)
+	return id
 }
 
 func (s *RunStore) eventsPath(id string) string  { return filepath.Join(s.RunsDir, id+".jsonl") }
 func (s *RunStore) metaPath(id string) string    { return filepath.Join(s.RunsDir, id+".meta.json") }
 func (s *RunStore) summaryPath(id string) string { return filepath.Join(s.RunsDir, id+".summary.json") }
+func (s *RunStore) errorsPath(id string) string  { return filepath.Join(s.RunsDir, id+".errors.json") }
+func (s *RunStore) stderrPath(id string) string  { return filepath.Join(s.RunsDir, id+".stderr.log") }
 
 // NewRunID returns a sortable UTC timestamp id with a random suffix.
 func NewRunID(t time.Time) string {
@@ -92,19 +128,18 @@ func NewRunID(t time.Time) string {
 	return t.UTC().Format("20060102T150405.000Z") + "-" + hex.EncodeToString(b[:])
 }
 
-// RunWriter streams events for one run to both the per-run file and the
-// backward-compatible last_run.jsonl pointer.
+// RunWriter streams events for one run to its per-run file.
 type RunWriter struct {
 	store *RunStore
 	meta  RunMeta
 
-	mu   sync.Mutex
-	f    *os.File
-	bw   *bufio.Writer
-	lf   *os.File
-	lbw  *bufio.Writer
-	evs  []Event
-	done bool
+	mu     sync.Mutex
+	f      *os.File
+	bw     *bufio.Writer
+	evs    []Event
+	errs   []TraceError
+	stderr []string
+	done   bool
 }
 
 // Create starts a new run and returns its writer.
@@ -116,11 +151,6 @@ func (s *RunStore) Create(cmd, lang, mode string) (*RunWriter, error) {
 	id := NewRunID(started)
 	f, err := os.Create(s.eventsPath(id))
 	if err != nil {
-		return nil, err
-	}
-	lf, err := os.Create(s.LastPtr)
-	if err != nil {
-		f.Close()
 		return nil, err
 	}
 	rev, dirty := gitState(s.Root)
@@ -136,18 +166,29 @@ func (s *RunStore) Create(cmd, lang, mode string) (*RunWriter, error) {
 			GitRev:  rev,
 			Dirty:   dirty,
 		},
-		f:   f,
-		bw:  bufio.NewWriterSize(f, 64*1024),
-		lf:  lf,
-		lbw: bufio.NewWriterSize(lf, 64*1024),
+		f:  f,
+		bw: bufio.NewWriterSize(f, 64*1024),
 	}, nil
 }
 
 // ID returns the run id.
 func (w *RunWriter) ID() string { return w.meta.ID }
 
-// WriteLine writes one raw JSONL line to both the run file and last_run.jsonl.
-// The line is parsed so the summary can be built on Close.
+// SetDiagnostics attaches what the child wrote to stderr that was not a trace
+// event. Crash records go to a sidecar; the retained lines go to a stderr log so a
+// run that failed without a recognisable panic is still diagnosable.
+func (w *RunWriter) SetDiagnostics(d *Diagnostics) {
+	if d == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.errs = d.Errors()
+	w.stderr = d.Lines()
+}
+
+// WriteLine writes one raw JSONL line to the run file. The line is parsed so the
+// summary can be built on Close.
 func (w *RunWriter) WriteLine(line string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -155,9 +196,6 @@ func (w *RunWriter) WriteLine(line string) error {
 		return nil
 	}
 	if _, err := w.bw.WriteString(line + "\n"); err != nil {
-		return err
-	}
-	if _, err := w.lbw.WriteString(line + "\n"); err != nil {
 		return err
 	}
 	if e, err := ParseEvent([]byte(line)); err == nil {
@@ -184,12 +222,12 @@ func (w *RunWriter) Close(exitCode int) error {
 	}
 	w.done = true
 	events := w.evs
+	errs := w.errs
+	stderrLines := w.stderr
 	w.mu.Unlock()
 
 	_ = w.bw.Flush()
-	_ = w.lbw.Flush()
 	_ = w.f.Close()
-	_ = w.lf.Close()
 
 	ended := time.Now().UTC()
 	started, _ := time.Parse(time.RFC3339Nano, w.meta.Started)
@@ -201,6 +239,10 @@ func (w *RunWriter) Close(exitCode int) error {
 	meta.EventCount = len(events)
 	meta.EnterCount = sum.EnterCount
 	meta.ExitCount = sum.ExitCount
+	meta.ErrorCount = len(errs)
+	if len(errs) > 0 {
+		meta.FirstError = truncateMsg(errs[0].Message, 200)
+	}
 	for _, a := range sum.Anomalies {
 		if a.Kind == "dropped_events" {
 			meta.Dropped += 1
@@ -221,7 +263,29 @@ func (w *RunWriter) Close(exitCode int) error {
 	if err := writeJSON(w.store.summaryPath(meta.ID), sum); err != nil {
 		return err
 	}
+	if len(errs) > 0 {
+		if err := writeJSON(w.store.errorsPath(meta.ID), errs); err != nil {
+			return err
+		}
+	}
+	if len(stderrLines) > 0 {
+		body := strings.Join(stderrLines, "\n") + "\n"
+		if err := os.WriteFile(w.store.stderrPath(meta.ID), []byte(body), 0644); err != nil {
+			return err
+		}
+	}
 	return w.store.Prune()
+}
+
+// truncateMsg shortens a message for the manifest, which is shown in tables.
+func truncateMsg(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	if n <= 1 {
+		return s[:n]
+	}
+	return s[:n-1] + "…"
 }
 
 func writeJSON(path string, v interface{}) error {
@@ -236,10 +300,19 @@ func writeJSON(path string, v interface{}) error {
 func (s *RunStore) List() ([]RunMeta, error) {
 	entries, err := os.ReadDir(s.RunsDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
+		if !os.IsNotExist(err) {
+			return nil, err
 		}
-		return nil, err
+		entries = nil
+	}
+	// Adopt a pre-v3 traces/last_run.jsonl once while the store is empty, so an
+	// old trace is still listable and loadable.
+	if len(entries) == 0 {
+		if s.adoptLegacyPointer() != "" {
+			if entries, err = os.ReadDir(s.RunsDir); err != nil {
+				return nil, err
+			}
+		}
 	}
 	var metas []RunMeta
 	seen := make(map[string]bool)
@@ -351,6 +424,14 @@ func (s *RunStore) Load(id string) (*TraceRun, error) {
 		return nil, err
 	}
 	run.Events = events
+	if data, err := os.ReadFile(s.errorsPath(resolved)); err == nil {
+		_ = json.Unmarshal(data, &run.Errors)
+	}
+	if data, err := os.ReadFile(s.stderrPath(resolved)); err == nil {
+		if lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n"); len(lines) > 0 && lines[0] != "" {
+			run.Stderr = lines
+		}
+	}
 	if data, err := os.ReadFile(s.summaryPath(resolved)); err == nil {
 		_ = json.Unmarshal(data, &run.Summary)
 	}
@@ -374,7 +455,7 @@ func (s *RunStore) Load(id string) (*TraceRun, error) {
 	return run, nil
 }
 
-// Clear deletes a single run's files and keeps last_run.jsonl consistent.
+// Clear deletes a single run's files.
 func (s *RunStore) Clear(id string) error {
 	resolved, err := s.ResolveID(id)
 	if err != nil {
@@ -383,18 +464,20 @@ func (s *RunStore) Clear(id string) error {
 	_ = os.Remove(s.eventsPath(resolved))
 	_ = os.Remove(s.metaPath(resolved))
 	_ = os.Remove(s.summaryPath(resolved))
-	s.refreshLastPointer()
+	_ = os.Remove(s.errorsPath(resolved))
+	_ = os.Remove(s.stderrPath(resolved))
 	return nil
 }
 
-// ClearAll deletes every run and the last_run.jsonl pointer.
+// ClearAll deletes every run and any legacy pointer file, so a cleared trace
+// cannot be re-adopted by adoptLegacyPointer.
 func (s *RunStore) ClearAll() (int, error) {
 	metas, err := s.List()
 	if err != nil {
 		return 0, err
 	}
 	s.removeFiles(metas)
-	_ = os.Remove(s.LastPtr)
+	_ = os.Remove(s.legacyLastPtr())
 	return len(metas), nil
 }
 
@@ -411,7 +494,6 @@ func (s *RunStore) Keep(n int) (int, error) {
 		return 0, nil
 	}
 	removed := s.removeFiles(metas[n:])
-	s.refreshLastPointer()
 	return removed, nil
 }
 
@@ -421,24 +503,10 @@ func (s *RunStore) removeFiles(metas []RunMeta) int {
 		_ = os.Remove(s.eventsPath(m.ID))
 		_ = os.Remove(s.metaPath(m.ID))
 		_ = os.Remove(s.summaryPath(m.ID))
+		_ = os.Remove(s.errorsPath(m.ID))
+		_ = os.Remove(s.stderrPath(m.ID))
 	}
 	return len(metas)
-}
-
-// refreshLastPointer makes last_run.jsonl a copy of the newest remaining run,
-// or removes it when there are no runs left.
-func (s *RunStore) refreshLastPointer() {
-	metas, err := s.List()
-	if err != nil || len(metas) == 0 {
-		_ = os.Remove(s.LastPtr)
-		return
-	}
-	data, err := os.ReadFile(s.eventsPath(metas[0].ID))
-	if err != nil {
-		_ = os.Remove(s.LastPtr)
-		return
-	}
-	_ = os.WriteFile(s.LastPtr, data, 0644)
 }
 
 // Prune deletes all but the newest Retain runs.
@@ -456,6 +524,8 @@ func (s *RunStore) Prune() error {
 		_ = os.Remove(s.eventsPath(id))
 		_ = os.Remove(s.metaPath(id))
 		_ = os.Remove(s.summaryPath(id))
+		_ = os.Remove(s.errorsPath(id))
+		_ = os.Remove(s.stderrPath(id))
 	}
 	return nil
 }

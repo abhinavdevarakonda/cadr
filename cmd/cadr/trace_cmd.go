@@ -106,7 +106,7 @@ func traceUsage() {
 	fmt.Println("  --run <id|last>   select a run (default: last)")
 	fmt.Println("  --json            machine-readable output (see docs/trace-cli.md)")
 	fmt.Println("  --full            do not truncate lists")
-	fmt.Println("  --fn <name>       filter summary by function")
+	fmt.Println("  --fn <name>       one function: summary stats, or tree = that subtree")
 	fmt.Println("  --ctx <id>        restrict/select an execution context")
 	fmt.Println("  --depth <n>       tree depth limit")
 	fmt.Println("  --window <n>      rows shown before truncating")
@@ -277,6 +277,7 @@ func traceVerify(args []string) {
 	if len(rep.Errors) >= 50 || len(rep.Warnings) >= 50 {
 		fmt.Println("  ... (truncated)")
 	}
+	fmt.Print(tracer.FormatErrors(run.Errors, "."))
 	if failed {
 		os.Exit(1)
 	}
@@ -298,6 +299,7 @@ func traceSummary(args []string) {
 	run := loadRun(f.run)
 	if f.graph {
 		run.Summary.AddGraphAnomalies(staticFuncs("."), 10)
+		run.Errors = tracer.Localize(run.Errors, staticFuncs("."))
 	}
 	if f.json {
 		if f.fn != "" {
@@ -346,6 +348,7 @@ func traceSummary(args []string) {
 	for _, a := range run.Summary.Anomalies {
 		fmt.Printf("anomaly: %s: %s\n", a.Kind, a.Detail)
 	}
+	fmt.Print(tracer.FormatErrors(run.Errors, "."))
 }
 
 func printFnTable(fns []tracer.FnStat, withFile bool) {
@@ -359,6 +362,75 @@ func printFnTable(fns []tracer.FnStat, withFile bool) {
 	}
 }
 
+// forestForFn returns a forest whose context roots are every invocation of fn, so
+// the JSON tree view can be scoped the same way the text view is. nil means the
+// function never ran.
+func forestForFn(forest *tracer.Forest, fn string) *tracer.Forest {
+	out := &tracer.Forest{}
+	for _, c := range forest.Contexts {
+		ct := &tracer.ContextTree{Ctx: c.Ctx}
+		var collect func(*tracer.TreeNode)
+		collect = func(n *tracer.TreeNode) {
+			if matchesFn(n.Event.Name, fn) {
+				ct.Roots = append(ct.Roots, n)
+			}
+			for _, ch := range n.Children {
+				collect(ch)
+			}
+		}
+		for _, r := range c.Roots {
+			collect(r)
+		}
+		if len(ct.Roots) > 0 {
+			out.Contexts = append(out.Contexts, ct)
+		}
+	}
+	if len(out.Contexts) == 0 {
+		return nil
+	}
+	return out
+}
+
+// rowsForFn keeps the display rows belonging to any invocation of fn: the match
+// and everything below it.
+func rowsForFn(forest *tracer.Forest, rows []tracer.DisplayRow, fn string) []tracer.DisplayRow {
+	keep := make(map[*tracer.TreeNode]bool)
+	var mark func(*tracer.TreeNode)
+	mark = func(n *tracer.TreeNode) {
+		keep[n] = true
+		for _, ch := range n.Children {
+			mark(ch)
+		}
+	}
+	var walk func(*tracer.TreeNode)
+	walk = func(n *tracer.TreeNode) {
+		if matchesFn(n.Event.Name, fn) {
+			mark(n)
+		}
+		for _, ch := range n.Children {
+			walk(ch)
+		}
+	}
+	for _, c := range forest.Contexts {
+		for _, r := range c.Roots {
+			walk(r)
+		}
+	}
+	out := make([]tracer.DisplayRow, 0, len(keep))
+	for _, row := range rows {
+		if row.Node != nil && keep[row.Node] {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+// matchesFn accepts the full name or a dotted suffix ("ListBooks" matches
+// "handlers.ListBooks").
+func matchesFn(name, fn string) bool {
+	return name == fn || strings.HasSuffix(name, "."+fn)
+}
+
 func traceTree(args []string) {
 	f := parseTraceFlags(args)
 	run := loadRun(f.run)
@@ -366,11 +438,21 @@ func traceTree(args []string) {
 	if f.ctx != "" {
 		forest = filterForest(forest, f.ctx)
 	}
+	if f.fn != "" && forestForFn(forest, f.fn) == nil {
+		fmt.Printf("function %q did not run in this run (use `cadr trace summary` to see what did)\n", f.fn)
+		return
+	}
 	if f.json {
+		if f.fn != "" {
+			forest = forestForFn(forest, f.fn)
+		}
 		printJSON(treeJSON(run.ID, forest))
 		return
 	}
 	rows := forest.DisplayRows()
+	if f.fn != "" {
+		rows = rowsForFn(forest, rows, f.fn)
+	}
 	if len(rows) == 0 {
 		fmt.Println("no enter events in this run.")
 		return
@@ -620,7 +702,7 @@ func staticFuncs(root string) []tracer.StaticFunc {
 	var out []tracer.StaticFunc
 	for _, n := range res.Graph.Nodes {
 		if n.Type == graph.FunctionNode {
-			out = append(out, tracer.StaticFunc{Name: n.Name, File: n.Path, Line: n.Line})
+			out = append(out, tracer.StaticFunc{Name: n.Name, File: n.Path, Line: n.Line, EndLine: n.EndLine})
 		}
 	}
 	return out

@@ -2,7 +2,6 @@ package tracer
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,7 +25,7 @@ var goVerbList = map[string]bool{
 	"mod": true, "telemetry": true, "tool": true, "version": true,
 }
 
-func runGoCmd(fullCmd string, localOnly bool, onEvent func(Event)) error {
+func runGoCmd(fullCmd string, opts RunOptions) error {
 	parts := agents.SplitCommand(fullCmd)
 	if len(parts) == 0 {
 		return fmt.Errorf("empty command")
@@ -59,7 +58,7 @@ func runGoCmd(fullCmd string, localOnly bool, onEvent func(Event)) error {
 		}
 	}
 
-	if localOnly {
+	if opts.LocalOnly {
 		env = append(env, "CADR_LOCAL_ONLY=1")
 	}
 
@@ -86,12 +85,18 @@ func runGoCmd(fullCmd string, localOnly bool, onEvent func(Event)) error {
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
-		var event Event
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			fmt.Fprintln(os.Stderr, line)
+		if e, ok := ParseEventLine([]byte(line)); ok {
+			if opts.OnEvent != nil {
+				opts.OnEvent(e)
+			}
 			continue
 		}
-		onEvent(event)
+		// Not a trace event: app output, a log line or a panic.
+		if opts.OnDiagnostic != nil {
+			opts.OnDiagnostic(line)
+			continue
+		}
+		fmt.Fprintln(os.Stderr, line)
 	}
 
 	return cmd.Wait()

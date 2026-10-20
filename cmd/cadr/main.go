@@ -226,8 +226,8 @@ func main() {
 
 	case "mcp":
 		// empty result so we can start the server immediately
-		result := &analyzer.Result{Root: path}
-		mcpSrv := server.NewMCPServer(result)
+		results := server.NewResultStore(&analyzer.Result{Root: path})
+		mcpSrv := server.NewMCPServer(results)
 		stdioSrv := mcpserver.NewStdioServer(mcpSrv)
 
 		// run analysis in background so it doesn't block server startup
@@ -235,10 +235,10 @@ func main() {
 			fullResult, err := analyzer.Analyze(path)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "cadr: %v\n", err)
-				*result = analyzer.Result{Root: path, Graph: graph.New()}
+				results.Set(&analyzer.Result{Root: path, Graph: graph.New()})
 				return
 			}
-			*result = fullResult
+			results.Set(&fullResult)
 		}()
 
 		if err := stdioSrv.Listen(context.Background(), os.Stdin, os.Stdout); err != nil {
@@ -359,8 +359,19 @@ func main() {
 		}()
 
 		fmt.Fprintf(os.Stderr, "Recording trace to .cadr/traces/runs/%s.jsonl...\n", rw.ID())
-		runErr := tracer.RunWithLang(cmdStr, langOverride, func(e tracer.Event) {})
+		diag := tracer.NewDiagnostics()
+		runErr := tracer.RunCommand(cmdStr, tracer.RunOptions{
+			LangOverride: langOverride,
+			OnEvent:      func(tracer.Event) {},
+			// Keep the CLI's old behaviour of showing the program's own output,
+			// while also recording it for `cadr trace summary`.
+			OnDiagnostic: func(line string) {
+				diag.Add(line)
+				fmt.Fprintln(os.Stderr, line)
+			},
+		})
 		ln.Close()
+		rw.SetDiagnostics(diag)
 
 		exitCode := 0
 		if runErr != nil {

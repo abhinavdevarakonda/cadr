@@ -3,13 +3,10 @@ package server
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"sort"
 	"strings"
+	"time"
 
 	"github.com/abhinavdevarakonda/cadr/internal/analyzer"
 	"github.com/abhinavdevarakonda/cadr/internal/graph"
@@ -18,7 +15,11 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
-func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
+// stillAnalyzing is the notice returned while the background analyzer is still
+// filling the graph.
+const stillAnalyzing = "cadr is still analyzing the project in the background. Please try again in a few seconds."
+
+func NewMCPServer(results *ResultStore) *mcpserver.MCPServer {
 	s := mcpserver.NewMCPServer("cadr", "1.0.0")
 
 	// global tool to change the current working project
@@ -31,10 +32,13 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("failed to analyze %s: %v", newPath, err)), nil
 		}
-		*result = newResult // update shared pointer
+		if newResult.Graph == nil {
+			newResult.Graph = graph.New()
+		}
+		results.Set(&newResult)
 
 		var funcCount int
-		for _, n := range result.Graph.Nodes {
+		for _, n := range newResult.Graph.Nodes {
 			if n.Type == graph.FunctionNode {
 				funcCount++
 			}
@@ -47,12 +51,13 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		mcp.WithDescription("Find function/symbol IDs by name"),
 		mcp.WithString("name", mcp.Description("Symbol name"), mcp.Required()),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if result.Graph == nil {
-			return mcp.NewToolResultText("cadr is still analyzing the project in the background. Please try again in a few seconds."), nil
+		res := results.Get()
+		if res.Graph == nil {
+			return mcp.NewToolResultText(stillAnalyzing), nil
 		}
 		name, _ := request.RequireString("name")
 		var matches []string
-		for id, n := range result.Graph.Nodes {
+		for id, n := range res.Graph.Nodes {
 			if n.Name == name && n.Type == graph.FunctionNode {
 				matches = append(matches, fmt.Sprintf("%s (%s)", id, n.Path))
 			}
@@ -67,11 +72,12 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		mcp.WithDescription("Get detailed info about a node (dir, file, or function)"),
 		mcp.WithString("id", mcp.Description("Node ID"), mcp.Required()),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if result.Graph == nil {
-			return mcp.NewToolResultText("cadr is still analyzing the project in the background. Please try again in a few seconds."), nil
+		res := results.Get()
+		if res.Graph == nil {
+			return mcp.NewToolResultText(stillAnalyzing), nil
 		}
 		id, _ := request.RequireString("id")
-		n, ok := result.Graph.Nodes[id]
+		n, ok := res.Graph.Nodes[id]
 		if !ok {
 			return mcp.NewToolResultError("Node not found"), nil
 		}
@@ -79,59 +85,71 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 	})
 
 	s.AddTool(mcp.NewTool("get_callers",
-		mcp.WithDescription("Find immediate callers of a function"),
+		mcp.WithDescription("Immediate callers of a function and the line they call it from. Use it for a quick 'who uses this' check; use impact_analysis when you need the full transitive blast radius."),
 		mcp.WithString("function_id", mcp.Required()),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if result.Graph == nil {
-			return mcp.NewToolResultText("cadr is still analyzing the project in the background. Please try again in a few seconds."), nil
+		res := results.Get()
+		if res.Graph == nil {
+			return mcp.NewToolResultText(stillAnalyzing), nil
 		}
 		id, _ := request.RequireString("function_id")
-		callers := analyzer.ImpactAnalysis(result.Graph, id)
-		var res []string
+		callers := analyzer.ImpactAnalysis(res.Graph, id)
+		var out []string
 		for _, c := range callers {
-			res = append(res, fmt.Sprintf("%s (at line %d)", c.ID, c.Line))
+			path := ""
+			if n, ok := res.Graph.Nodes[c.ID]; ok {
+				path = n.Path
+			}
+			out = append(out, fmt.Sprintf("%s  (%s:%d)", c.ID, shortFile(path), c.Line))
 		}
-		return mcp.NewToolResultText(strings.Join(res, "\n")), nil
+		return mcp.NewToolResultText(strings.Join(out, "\n")), nil
 	})
 
 	s.AddTool(mcp.NewTool("get_callees",
-		mcp.WithDescription("Find functions called by this function"),
+		mcp.WithDescription("Immediate functions this one calls, with the line of each call. Use it to see direct dependencies; use trace_calls for the full transitive set."),
 		mcp.WithString("function_id", mcp.Required()),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if result.Graph == nil {
-			return mcp.NewToolResultText("cadr is still analyzing the project in the background. Please try again in a few seconds."), nil
+		res := results.Get()
+		if res.Graph == nil {
+			return mcp.NewToolResultText(stillAnalyzing), nil
 		}
 		id, _ := request.RequireString("function_id")
-		callees := analyzer.TraceAnalysis(result.Graph, id)
-		var res []string
+		callees := analyzer.TraceAnalysis(res.Graph, id)
+		var out []string
 		for _, c := range callees {
-			res = append(res, fmt.Sprintf("%s (at line %d)", c.ID, c.Line))
+			path := ""
+			if n, ok := res.Graph.Nodes[c.ID]; ok {
+				path = n.Path
+			}
+			out = append(out, fmt.Sprintf("%s  (%s:%d)", c.ID, shortFile(path), c.Line))
 		}
-		return mcp.NewToolResultText(strings.Join(res, "\n")), nil
+		return mcp.NewToolResultText(strings.Join(out, "\n")), nil
 	})
 
 	s.AddTool(mcp.NewTool("impact_analysis",
-		mcp.WithDescription("Transitively find all functions affected if this function changes"),
+		mcp.WithDescription("Everything that breaks if you change this function: the transitive callers, grouped by hop, each with the file:line where it calls the next hop down. Use it BEFORE editing a signature or behaviour — the result is an edit checklist, not a list of names. Follow up with get_node_source on the hop-1 call sites."),
 		mcp.WithString("function_id", mcp.Required()),
+		mcp.WithBoolean("full", mcp.Description("Do not truncate the call-site list")),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if result.Graph == nil {
-			return mcp.NewToolResultText("cadr is still analyzing the project in the background. Please try again in a few seconds."), nil
+		res := results.Get()
+		if res.Graph == nil {
+			return mcp.NewToolResultText(stillAnalyzing), nil
 		}
 		id, _ := request.RequireString("function_id")
-		affected := analyzer.TransitiveImpact(result.Graph, id)
-		return mcp.NewToolResultText(strings.Join(affected, "\n")), nil
+		return mcp.NewToolResultText(formatImpact("impact", id, analyzer.CallersByHop(res.Graph, id), request.GetBool("full", false))), nil
 	})
 
 	s.AddTool(mcp.NewTool("trace_calls",
-		mcp.WithDescription("Transitively find all functions called by this function"),
+		mcp.WithDescription("Everything this function depends on, transitively, grouped by hop with the file:line of each call. Use it BEFORE changing an implementation to see what must keep working; use get_callees for the immediate callers/callees only."),
 		mcp.WithString("function_id", mcp.Required()),
+		mcp.WithBoolean("full", mcp.Description("Do not truncate the call-site list")),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if result.Graph == nil {
-			return mcp.NewToolResultText("cadr is still analyzing the project in the background. Please try again in a few seconds."), nil
+		res := results.Get()
+		if res.Graph == nil {
+			return mcp.NewToolResultText(stillAnalyzing), nil
 		}
 		id, _ := request.RequireString("function_id")
-		called := analyzer.TransitiveTrace(result.Graph, id)
-		return mcp.NewToolResultText(strings.Join(called, "\n")), nil
+		return mcp.NewToolResultText(formatImpact("callees", id, analyzer.CalleesByHop(res.Graph, id), request.GetBool("full", false))), nil
 	})
 
 	s.AddTool(mcp.NewTool("call_path",
@@ -139,12 +157,13 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		mcp.WithString("start_id", mcp.Required()),
 		mcp.WithString("end_id", mcp.Required()),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if result.Graph == nil {
-			return mcp.NewToolResultText("cadr is still analyzing the project in the background. Please try again in a few seconds."), nil
+		res := results.Get()
+		if res.Graph == nil {
+			return mcp.NewToolResultText(stillAnalyzing), nil
 		}
 		start, _ := request.RequireString("start_id")
 		end, _ := request.RequireString("end_id")
-		path := analyzer.FindPath(result.Graph, start, end)
+		path := analyzer.FindPath(res.Graph, start, end)
 		if len(path) == 0 {
 			return mcp.NewToolResultText("No path found."), nil
 		}
@@ -155,28 +174,30 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		mcp.WithDescription("List all functions defined in a specific file"),
 		mcp.WithString("file_path", mcp.Required()),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if result.Graph == nil {
-			return mcp.NewToolResultText("cadr is still analyzing the project in the background. Please try again in a few seconds."), nil
+		res := results.Get()
+		if res.Graph == nil {
+			return mcp.NewToolResultText(stillAnalyzing), nil
 		}
 		path, _ := request.RequireString("file_path")
-		var res []string
-		for id, n := range result.Graph.Nodes {
+		var out []string
+		for id, n := range res.Graph.Nodes {
 			if n.Path == path && n.Type == graph.FunctionNode {
-				res = append(res, fmt.Sprintf("%s (line %d)", id, n.Line))
+				out = append(out, fmt.Sprintf("%s (line %d)", id, n.Line))
 			}
 		}
-		return mcp.NewToolResultText(strings.Join(res, "\n")), nil
+		return mcp.NewToolResultText(strings.Join(out, "\n")), nil
 	})
 
 	s.AddTool(mcp.NewTool("get_node_source",
 		mcp.WithDescription("Get the source code for a specific function node"),
 		mcp.WithString("id", mcp.Required()),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if result.Graph == nil {
-			return mcp.NewToolResultText("cadr is still analyzing the project in the background. Please try again in a few seconds."), nil
+		res := results.Get()
+		if res.Graph == nil {
+			return mcp.NewToolResultText(stillAnalyzing), nil
 		}
 		id, _ := request.RequireString("id")
-		n, ok := result.Graph.Nodes[id]
+		n, ok := res.Graph.Nodes[id]
 		if !ok || n.Type != graph.FunctionNode {
 			return mcp.NewToolResultError("Function node not found"), nil
 		}
@@ -208,107 +229,52 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		return mcp.NewToolResultText(strings.Join(source, "\n")), nil
 	})
 
-	s.AddTool(mcp.NewTool("run_trace",
-		mcp.WithDescription("Run an arbitrary command and trace its function calls dynamically. Returns the exit code, a bounded per-function summary, and the first error line when the command fails."),
-		mcp.WithString("command", mcp.Description("The shell command to trace, e.g. 'python app.py'"), mcp.Required()),
-	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		command, _ := request.RequireString("command")
-		var events []tracer.Event
-
-		runErr := tracer.RunLocal(command, func(e tracer.Event) {
-			events = append(events, e)
-		})
-
-		exitCode := 0
-		if runErr != nil {
-			if ee, ok := runErr.(*exec.ExitError); ok {
-				exitCode = ee.ExitCode()
-			} else {
-				exitCode = 1
-			}
-		}
-		if len(events) == 0 {
-			if runErr != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("command failed (exit %d): %v", exitCode, runErr)), nil
-			}
-			return mcp.NewToolResultText("Command ran but no trace hits were collected."), nil
-		}
-
-		sum := tracer.Summarize(events)
-		var b strings.Builder
-		fmt.Fprintf(&b, "exit_code: %d\n", exitCode)
-		if runErr != nil {
-			fmt.Fprintf(&b, "error: %v\n", runErr)
-		}
-		b.WriteString(formatSummaryText(sum, false))
-		return mcp.NewToolResultText(b.String()), nil
-	})
-
 	s.AddTool(mcp.NewTool("get_last_trace",
-		mcp.WithDescription("Summarize the last recorded trace from .cadr/traces/last_run.jsonl (created by 'cadr rec'). Bounded by default; set full:true for the raw JSONL lines."),
+		mcp.WithDescription("Summarize the most recent recorded run. Equivalent to trace_summary(run=\"last\"), kept as a compatibility alias: it prints the run id, joins the static graph, and includes errors."),
 		mcp.WithString("fn", mcp.Description("Optional: filter by function name")),
-		mcp.WithBoolean("full", mcp.Description("Return raw JSONL lines instead of a summary")),
-		mcp.WithNumber("limit", mcp.Description("Optional: max raw lines when full:true")),
+		mcp.WithBoolean("full", mcp.Description("Do not truncate the function list")),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		tracePath := filepath.Join(result.Root, ".cadr", "traces", "last_run.jsonl")
-		events, err := tracer.ReadEvents(tracePath)
-		if err != nil {
-			return mcp.NewToolResultError("No recorded trace found. Run 'cadr rec <command>' first."), nil
-		}
-		fnFilter := request.GetString("fn", "")
-		if fnFilter != "" {
-			var filtered []tracer.Event
-			for _, e := range events {
-				if e.Name == fnFilter {
-					filtered = append(filtered, e)
-				}
-			}
-			events = filtered
-		}
-		if len(events) == 0 {
-			if fnFilter != "" {
-				return mcp.NewToolResultText(fmt.Sprintf("No calls to '%s' found in the last trace.", fnFilter)), nil
-			}
-			return mcp.NewToolResultText("Trace file is empty."), nil
-		}
-
-		if request.GetBool("full", false) {
-			limit := request.GetInt("limit", 200)
-			var lines []string
-			for i, e := range events {
-				if i >= limit {
-					lines = append(lines, fmt.Sprintf("... %d more lines", len(events)-limit))
-					break
-				}
-				data, _ := json.Marshal(e)
-				lines = append(lines, string(data))
-			}
-			return mcp.NewToolResultText(fmt.Sprintf("Last recorded trace (%d events):\n%s", len(events), strings.Join(lines, "\n"))), nil
-		}
-
-		return mcp.NewToolResultText(formatSummaryText(tracer.Summarize(events), false)), nil
+		res := results.Get()
+		return summaryResult(res.Root, res.Graph, "last", request.GetString("fn", ""), request.GetBool("full", false))
 	})
 
 	s.AddTool(mcp.NewTool("trace_runs",
 		mcp.WithDescription("List recorded trace runs (newest first)"),
 		mcp.WithNumber("limit", mcp.Description("Max runs to list (default 20)")),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		store := tracer.NewRunStore(result.Root)
+		res := results.Get()
+		store := tracer.NewRunStore(res.Root)
 		metas, err := store.List()
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		if len(metas) == 0 {
-			return mcp.NewToolResultText("No runs recorded yet. Use run_trace or 'cadr rec'."), nil
+			return mcp.NewToolResultText("No runs recorded yet. Use 'cadr rec \"<command>\"' to record one."), nil
 		}
 		limit := request.GetInt("limit", 20)
 		var b strings.Builder
+		fmt.Fprintf(&b, "%-34s %-19s %9s %4s %7s %4s  %s\n", "RUN", "STARTED", "DURATION", "EXIT", "EVENTS", "ERR", "CMD")
 		for i, m := range metas {
 			if i >= limit {
-				fmt.Fprintf(&b, "... %d more runs\n", len(metas)-limit)
+				fmt.Fprintf(&b, "... %d more runs (limit=N to raise)\n", len(metas)-limit)
 				break
 			}
-			fmt.Fprintf(&b, "%s  %s  %d events  exit=%d  cmd=%q\n", m.ID, m.Started, m.EventCount, m.ExitCode, m.Cmd)
+			started := m.Started
+			if t, err := time.Parse(time.RFC3339Nano, m.Started); err == nil {
+				started = t.Local().Format("2006-01-02 15:04:05")
+			}
+			if started == "" {
+				started = "(unknown)"
+			}
+			cmd := m.Cmd
+			if cmd == "" {
+				cmd = "(unknown — interrupted or pre-v3 run)"
+			}
+			dur := "-"
+			if m.DurationMs > 0 {
+				dur = durStr(m.DurationMs * int64(time.Millisecond))
+			}
+			fmt.Fprintf(&b, "%-34s %-19s %9s %4d %7d %4d  %s\n", m.ID, started, dur, m.ExitCode, m.EventCount, m.ErrorCount, cmd)
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	})
@@ -319,36 +285,21 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		mcp.WithString("fn", mcp.Description("Optional: restrict to a single function")),
 		mcp.WithBoolean("full", mcp.Description("Do not truncate the function list")),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		run, err := loadRun(result.Root, request.GetString("run", "last"))
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		if result.Graph != nil {
-			var sf []tracer.StaticFunc
-			for _, n := range result.Graph.Nodes {
-				if n.Type == graph.FunctionNode {
-					sf = append(sf, tracer.StaticFunc{Name: n.Name, File: n.Path, Line: n.Line})
-				}
-			}
-			run.Summary.AddGraphAnomalies(sf, 10)
-		}
-		if fn := request.GetString("fn", ""); fn != "" {
-			if s, ok := run.Summary.FnStatFor(fn); ok {
-				return mcp.NewToolResultText(formatFnStat(s)), nil
-			}
-			return mcp.NewToolResultText(fmt.Sprintf("function %q not found in run %s", fn, run.ID)), nil
-		}
-		return mcp.NewToolResultText(fmt.Sprintf("run %s cmd=%q\n%s", run.ID, run.Meta.Cmd, formatSummaryText(run.Summary, request.GetBool("full", false)))), nil
+		res := results.Get()
+		return summaryResult(res.Root, res.Graph, request.GetString("run", "last"), request.GetString("fn", ""), request.GetBool("full", false))
 	})
 
 	s.AddTool(mcp.NewTool("trace_tree",
-		mcp.WithDescription("Chronological call tree (indented) for a recorded run"),
+		mcp.WithDescription("Indented call tree for a recorded run. Scope it with ctx=<id> (one request), fn=<name> (one function's subtree) or route=<label> (that route's requests merged into one tree with call counts). Unscoped output on a busy run tells you to pick a scope instead of dumping every row."),
 		mcp.WithString("run", mcp.Description("Run id or 'last' (default)")),
-		mcp.WithString("ctx", mcp.Description("Optional: only this execution context")),
+		mcp.WithString("ctx", mcp.Description("Optional: only this execution context (one request/goroutine); see trace_context for ids")),
+		mcp.WithString("fn", mcp.Description("Optional: only this function's subtree, across the run")),
+		mcp.WithString("route", mcp.Description("Optional: merge every request to this route into one tree with per-edge counts")),
 		mcp.WithNumber("depth", mcp.Description("Max tree depth")),
-		mcp.WithNumber("rows", mcp.Description("Max rows (default 200)")),
+		mcp.WithNumber("rows", mcp.Description("Max rows (default 40)")),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		run, err := loadRun(result.Root, request.GetString("run", "last"))
+		res := results.Get()
+		run, err := loadRun(res.Root, request.GetString("run", "last"))
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -357,8 +308,14 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		if v := request.GetFloat("depth", 0); v > 0 {
 			depth = int(v)
 		}
-		rows := request.GetInt("rows", 200)
-		return mcp.NewToolResultText("run " + run.ID + "\n" + formatForestText(forest, request.GetString("ctx", ""), depth, rows)), nil
+		rows := request.GetInt("rows", 40)
+		scope := treeScope{
+			Ctx:   request.GetString("ctx", ""),
+			Fn:    request.GetString("fn", ""),
+			Route: request.GetString("route", ""),
+		}
+		out := treeOut{traceEnvelope: newEnvelope(run), Scope: scopeOf(scope)}
+		return mcp.NewToolResultStructured(out, formatTree(run, forest, res.Root, scope, depth, rows)), nil
 	})
 
 	s.AddTool(mcp.NewTool("trace_diff",
@@ -366,61 +323,66 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		mcp.WithString("a", mcp.Description("Baseline run id or 'last'"), mcp.Required()),
 		mcp.WithString("b", mcp.Description("Candidate run id"), mcp.Required()),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		res := results.Get()
 		aID, _ := request.RequireString("a")
 		bID, _ := request.RequireString("b")
-		a, err := loadRun(result.Root, aID)
+		a, err := loadRun(res.Root, aID)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		b, err := loadRun(result.Root, bID)
+		b, err := loadRun(res.Root, bID)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return mcp.NewToolResultText(formatDiffText(tracer.Diff(a.Events, b.Events), a.ID, b.ID)), nil
+		if a.ID == b.ID {
+			return mcp.NewToolResultError(fmt.Sprintf("cannot diff run %s against itself; pass two different run ids", a.ID)), nil
+		}
+		diff := tracer.Diff(a.Events, b.Events)
+		out := diffOut{A: a.ID, B: b.ID, Diff: diff, ARuns: runFilePath(a), BRuns: runFilePath(b)}
+		return mcp.NewToolResultStructured(out, formatDiffText(diff, a.ID, b.ID)), nil
 	})
 
 	s.AddTool(mcp.NewTool("trace_context",
-		mcp.WithDescription("List execution contexts (goroutines/threads/tasks) of a recorded run"),
+		mcp.WithDescription("Request/context index for a recorded run: one line per execution context (goroutine/thread/task), hottest first, labelled with the HTTP route when the handler is known. Start here for a server run, then call trace_tree with ctx=<id> or route=<label>."),
 		mcp.WithString("run", mcp.Description("Run id or 'last' (default)")),
+		mcp.WithNumber("limit", mcp.Description("Max contexts to list (default 20, hottest first)")),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		run, err := loadRun(result.Root, request.GetString("run", "last"))
+		res := results.Get()
+		run, err := loadRun(res.Root, request.GetString("run", "last"))
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		forest := tracer.BuildForest(run.Events)
-		var b strings.Builder
-		fmt.Fprintf(&b, "run %s: %d context(s)\n", run.ID, len(forest.Contexts))
-		for _, c := range forest.Contexts {
-			root := ""
-			var dur int64
-			for _, r := range c.Roots {
-				if r.Dur > dur {
-					dur = r.Dur
-					root = r.Event.Name
-				}
-			}
-			fmt.Fprintf(&b, "  ctx=%s root=%s dur=%s\n", c.Ctx, root, durStr(dur))
+		entries, idle := ctxEntries(forest, res.Root)
+		limit := request.GetInt("limit", 20)
+
+		out := contextOut{
+			traceEnvelope: newEnvelope(run),
+			IdleContexts:  idle,
+			ContextsTotal: len(entries),
 		}
-		return mcp.NewToolResultText(b.String()), nil
+		for i, e := range entries {
+			if limit > 0 && i >= limit {
+				out.ContextsOmitted = len(entries) - limit
+				break
+			}
+			out.Contexts = append(out.Contexts, contextRow{Ctx: e.Ctx, Route: e.Route, Fn: e.Fn, DurNs: e.Dur, Spans: e.Spans})
+		}
+		return mcp.NewToolResultStructured(out, formatContexts(run, res.Root, entries, idle, limit)), nil
 	})
 
 	s.AddTool(mcp.NewTool("trace_verify",
 		mcp.WithDescription("Check a recorded run's internal consistency (span pairing, timing, seq integrity). Returns ok plus errors/warnings; open spans are warnings for live servers."),
 		mcp.WithString("run", mcp.Description("Run id or 'last' (default)")),
 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		run, err := loadRun(result.Root, request.GetString("run", "last"))
+		res := results.Get()
+		run, err := loadRun(res.Root, request.GetString("run", "last"))
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		rep := tracer.Verify(run.Events)
-		if result.Graph != nil {
-			var sf []tracer.StaticFunc
-			for _, n := range result.Graph.Nodes {
-				if n.Type == graph.FunctionNode {
-					sf = append(sf, tracer.StaticFunc{Name: n.Name, File: n.Path, Line: n.Line})
-				}
-			}
-			rep = tracer.VerifyWithGraph(run.Events, sf, 10)
+		if res.Graph != nil {
+			rep = tracer.VerifyWithGraph(run.Events, staticFuncs(res.Graph), 10)
 		}
 		var b strings.Builder
 		fmt.Fprintf(&b, "run %s: ok=%v events=%d enter=%d exit=%d ctx=%d open=%d dropped=%d\n",
@@ -431,7 +393,15 @@ func NewMCPServer(result *analyzer.Result) *mcpserver.MCPServer {
 		for _, v := range rep.Warnings {
 			fmt.Fprintf(&b, "warn %s: %s\n", v.Check, v.Detail)
 		}
-		return mcp.NewToolResultText(b.String()), nil
+		b.WriteString(tracer.FormatErrors(run.Errors, res.Root))
+		out := verifyOut{
+			traceEnvelope: newEnvelope(run),
+			OK:            rep.OK,
+			Counts:        rep.Counts,
+			Violations:    rep.Errors,
+			Warnings:      rep.Warnings,
+		}
+		return mcp.NewToolResultStructured(out, b.String()), nil
 	})
 
 	return s
@@ -441,68 +411,64 @@ func loadRun(root, id string) (*tracer.TraceRun, error) {
 	return tracer.NewRunStore(root).Load(id)
 }
 
+// staticFuncs adapts the in-memory graph to the tracer's static-join shape.
+func staticFuncs(g *graph.Graph) []tracer.StaticFunc {
+	var sf []tracer.StaticFunc
+	for _, n := range g.Nodes {
+		if n.Type == graph.FunctionNode {
+			sf = append(sf, tracer.StaticFunc{Name: n.Name, File: n.Path, Line: n.Line, EndLine: n.EndLine})
+		}
+	}
+	return sf
+}
+
+// summaryResult renders the per-run digest. trace_summary and get_last_trace (a
+// compatibility alias) both go through it, so the two can never describe
+// different runs.
+func summaryResult(root string, g *graph.Graph, runID, fn string, full bool) (*mcp.CallToolResult, error) {
+	run, err := loadRun(root, runID)
+	if err != nil {
+		if runID == "" || runID == "last" {
+			return mcp.NewToolResultError("No recorded trace found. Record one with 'cadr rec \"<command>\"' first."), nil
+		}
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if g != nil {
+		run.Summary.AddGraphAnomalies(staticFuncs(g), 10)
+		run.Errors = tracer.Localize(run.Errors, staticFuncs(g))
+	}
+	if fn != "" {
+		s, ok := run.Summary.FnStatFor(fn)
+		if !ok {
+			return mcp.NewToolResultText(fmt.Sprintf("function %q not found in run %s", fn, run.ID)), nil
+		}
+		out := summaryOut{
+			traceEnvelope: newEnvelope(run),
+			Functions:     []tracer.FnStat{s},
+			Contexts:      len(run.Summary.Contexts),
+		}
+		return mcp.NewToolResultStructured(out, formatFnStat(s)), nil
+	}
+	var b strings.Builder
+	b.WriteString(formatRunHeader(run, len(run.Errors)))
+	b.WriteString(tracer.FormatErrors(run.Errors, root))
+	b.WriteString(formatSummaryText(run.Summary, full))
+	b.WriteString("\nfull run: " + runFilePath(run) + "\n")
+
+	warnings, anomalies := splitAnomalies(run.Summary)
+	out := summaryOut{
+		traceEnvelope: newEnvelope(run),
+		Functions:     run.Summary.Functions,
+		Contexts:      len(run.Summary.Contexts),
+		Warnings:      warnings,
+		Anomalies:     anomalies,
+	}
+	return mcp.NewToolResultStructured(out, b.String()), nil
+}
+
 func formatFnStat(s tracer.FnStat) string {
 	return fmt.Sprintf("%s  count=%d total=%s self=%s p50=%s p95=%s max=%s\n  %s:%d\n",
 		s.Fn, s.Count, durStr(s.Total), durStr(s.Self), durStr(s.P50), durStr(s.P95), durStr(s.Max), s.File, s.Line)
-}
-
-func formatSummaryText(sum *tracer.Summary, full bool) string {
-	var b strings.Builder
-	fns := append([]tracer.FnStat(nil), sum.Functions...)
-	sort.Slice(fns, func(i, j int) bool { return fns[i].Total > fns[j].Total })
-	limit := len(fns)
-	if !full && limit > 25 {
-		limit = 25
-	}
-	fmt.Fprintf(&b, "events=%d enter=%d exit=%d duration=%s\n", sum.EventCount, sum.EnterCount, sum.ExitCount, durStr(sum.DurationNs))
-	fmt.Fprintf(&b, "%-32s %6s %10s %10s\n", "FUNCTION", "COUNT", "TOTAL", "SELF")
-	for _, f := range fns[:limit] {
-		fmt.Fprintf(&b, "%-32s %6d %10s %10s\n", truncateName(f.Fn, 32), f.Count, durStr(f.Total), durStr(f.Self))
-	}
-	if limit < len(fns) {
-		fmt.Fprintf(&b, "... %d more functions (full:true to see all)\n", len(fns)-limit)
-	}
-	for _, a := range sum.Anomalies {
-		fmt.Fprintf(&b, "anomaly: %s: %s\n", a.Kind, a.Detail)
-	}
-	return b.String()
-}
-
-func formatForestText(forest *tracer.Forest, ctxFilter string, depthLimit, maxRows int) string {
-	var b strings.Builder
-	n := 0
-	for _, row := range forest.DisplayRows() {
-		if ctxFilter != "" && row.Ctx != ctxFilter {
-			continue
-		}
-		if depthLimit >= 0 && row.Node != nil && row.Node.Depth > depthLimit {
-			continue
-		}
-		if maxRows > 0 && n >= maxRows {
-			fmt.Fprintf(&b, "... truncated (%d rows)\n", len(forest.Flat))
-			break
-		}
-		indent := strings.Repeat("  ", row.Depth)
-		conn := ""
-		if row.Depth > 0 {
-			if row.Last {
-				conn = "└─ "
-			} else {
-				conn = "├─ "
-			}
-		}
-		marker := ""
-		if row.Root {
-			marker = "▸ "
-		}
-		dur := ""
-		if row.Dur > 0 {
-			dur = " [" + durStr(row.Dur) + "]"
-		}
-		fmt.Fprintf(&b, "%s%s%s%s%s\n", indent, conn, marker, row.Event.Name, dur)
-		n++
-	}
-	return b.String()
 }
 
 func formatDiffText(res *tracer.DiffResult, aID, bID string) string {
@@ -536,6 +502,9 @@ func formatDiffText(res *tracer.DiffResult, aID, bID string) string {
 		}
 		if res.FirstDivergeB != nil {
 			fmt.Fprintf(&b, "  b: %s %s:%d\n", res.FirstDivergeB.Name, res.FirstDivergeB.File, res.FirstDivergeB.Line)
+		}
+		if res.OrderChanged {
+			b.WriteString("  order changed (same functions, different sequence)\n")
 		}
 	}
 	return b.String()

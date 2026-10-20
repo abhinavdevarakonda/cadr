@@ -36,6 +36,28 @@ func ParseEvent(line []byte) (Event, error) {
 	return NormalizeEvent(e), nil
 }
 
+// ParseEventLine classifies one line received from a traced process. ok is false
+// when the line is not JSON or carries an unknown event kind, so the caller can
+// treat it as diagnostic output instead of inserting a phantom node into the tree.
+// Enter events must name a function; exit events do not (they are identified by
+// their span), which is why the fn check is per-kind.
+func ParseEventLine(line []byte) (Event, bool) {
+	e, err := ParseEvent(line)
+	if err != nil {
+		return Event{}, false
+	}
+	switch e.Ev {
+	case EvExit:
+		return e, true
+	case EvEnter:
+		if e.Name == "" {
+			return Event{}, false
+		}
+		return e, true
+	}
+	return Event{}, false
+}
+
 // DecodeEvents reads newline-delimited JSON events. Blank lines and lines that
 // are not valid JSON are skipped so a stray log line on the transport does not
 // abort a whole run.

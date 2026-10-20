@@ -9,9 +9,10 @@ import (
 // file:line. The dynamic side joins to it by line + file suffix, which is
 // robust to relative/absolute path differences and to method-name formatting.
 type StaticFunc struct {
-	Name string `json:"name"`
-	File string `json:"file"`
-	Line int    `json:"line"`
+	Name    string `json:"name"`
+	File    string `json:"file"`
+	Line    int    `json:"line"`
+	EndLine int    `json:"end_line,omitempty"`
 }
 
 // AddGraphAnomalies joins the dynamic summary to the static graph and appends

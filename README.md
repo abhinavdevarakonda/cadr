@@ -239,7 +239,7 @@ Core tools exposed to AI agents:
 - `impact_analysis`: Calculate transitive blast radius (all callers affected by a change).
 - `trace_calls`: Map the complete downstream call tree of a function.
 - `get_node_source`: Read exact function source boundaries without reading entire files.
-- `run_trace` / `get_last_trace`: Execute tests and read runtime parameters.
+- `get_last_trace`: Read the most recent recorded run. Record runs with `cadr rec "<command>"`.
 
 For the full 17-tool reference and agent prompts, see the [MCP Server Guide](docs/mcp.md).
 

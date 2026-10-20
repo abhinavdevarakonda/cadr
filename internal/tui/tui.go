@@ -50,6 +50,9 @@ var (
 	heatHigh    = lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // Vivid Red
 	heatBlazing = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true).Underline(true)
 
+	// errStyle marks a function where the traced run crashed.
+	errStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+
 	// icon config
 	useNerdIcons = true
 
@@ -73,6 +76,9 @@ const (
 )
 
 type TraceEventMsg tracer.Event
+
+// TraceErrorsMsg carries crash records parsed from the run's stderr.
+type TraceErrorsMsg struct{ Errors []tracer.TraceError }
 type TraceBatchMsg []tracer.Event
 type DiffUpdatedMsg struct{}
 
@@ -96,7 +102,9 @@ type Model struct {
 	playhead     int
 	isLive       bool
 	isMonitoring bool
-	hitCounts    map[string]int // ID -> count (enter events only)
+	hitCounts    map[string]int  // ID -> count (enter events only)
+	errored      map[string]bool // ID -> a crash was localized here
+	errText      string          // most recent crash message, shown in the status bar
 	rightScroll  int
 
 	// Tree view bookkeeping (parallel to history, enter events only).
@@ -161,6 +169,7 @@ func NewModel(g *graph.Graph, projectRoot string) Model {
 		isLive:        true,
 		followLive:    true,
 		hitCounts:     make(map[string]int),
+		errored:       make(map[string]bool),
 		lastAtDepth:   make(map[string]map[int]int),
 		spanIndex:     make(map[int64]int),
 		spanCtx:       make(map[int64]string),
@@ -468,6 +477,57 @@ func getSignature(path string, line int) string {
 // annotate the matching enter node with duration/self-time. This keeps
 // m.history, the hit heatmap and the 'Hit N/M' counter enter-only, so existing
 // semantics are unchanged even though the wire now carries both halves.
+// applyTraceErrors localizes each crash to a graph node and turns that function red
+// in the tree. The newest message is kept for the status bar.
+func (m *Model) applyTraceErrors(errs []tracer.TraceError) {
+	if len(errs) == 0 {
+		return
+	}
+	funcs := m.staticFuncs()
+	for _, e := range errs {
+		if e.File == "" {
+			continue
+		}
+		if id, ok := tracer.LookupFunc(funcs, e.File, e.Line); ok {
+			m.errored[id] = true
+		}
+	}
+	last := errs[len(errs)-1]
+	msg := last.Message
+	if msg == "" {
+		msg = "run failed"
+	}
+	if last.File != "" {
+		// Keep the location: clip the message, never the file:line.
+		msg = clipRunes(msg, 40) + " · " + fmt.Sprintf("%s:%d", last.File, last.Line)
+	}
+	m.errText = clipRunes(msg, 80)
+}
+
+// staticFuncs exposes the graph as source ranges, keyed by node ID so a resolved
+// name is directly usable as a tree key.
+func (m *Model) staticFuncs() []tracer.StaticFunc {
+	out := make([]tracer.StaticFunc, 0, len(m.graph.Nodes))
+	for _, n := range m.graph.Nodes {
+		if n.Type == graph.FunctionNode {
+			out = append(out, tracer.StaticFunc{Name: n.ID, File: n.Path, Line: n.Line, EndLine: n.EndLine})
+		}
+	}
+	return out
+}
+
+// clipRunes truncates s to at most n runes, adding an ellipsis when it cuts.
+func clipRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	if n <= 1 {
+		return string(r[:n])
+	}
+	return string(r[:n-1]) + "…"
+}
+
 func (m *Model) applyTraceEvent(e tracer.Event) {
 	e = tracer.NormalizeEvent(e)
 
@@ -1180,6 +1240,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.syncToHistory()
 			}
 		}
+	case TraceErrorsMsg:
+		m.applyTraceErrors(msg.Errors)
 	case TraceEventMsg:
 		m.applyTraceEvent(tracer.Event(msg))
 		if m.isLive {
@@ -1321,9 +1383,11 @@ func (m Model) View() string {
 		case graph.DirectoryNode:
 			nameStyle = dirStyle
 		case graph.FunctionNode:
-			// Apply Heatmap Style
+			// A localized crash overrides the heat colour.
 			count := m.hitCounts[item.ID]
-			if count > 100 {
+			if m.errored[item.ID] {
+				nameStyle = errStyle
+			} else if count > 100 {
 				nameStyle = heatBlazing
 			} else if count > 20 {
 				nameStyle = heatHigh
@@ -1364,7 +1428,11 @@ func (m Model) View() string {
 			}
 		}
 
-		plainLeft := indentStr + icon + item.Name
+		displayName := item.Name
+		if m.errored[item.ID] {
+			displayName = "✗ " + displayName
+		}
+		plainLeft := indentStr + icon + displayName
 		leftWidth := lipgloss.Width(plainLeft)
 		if leftWidth > contentWidth {
 			leftWidth = contentWidth
@@ -1401,13 +1469,13 @@ func (m Model) View() string {
 				}
 				line = selectedStyle.Render(row)
 			} else {
-				styledLeft := indentStr + iconStyle.Render(icon) + nameStyle.Render(item.Name)
+				styledLeft := indentStr + iconStyle.Render(icon) + nameStyle.Render(displayName)
 				if isHit {
 					baseColor := nameStyle.GetForeground()
 					if baseColor == lipgloss.Color("") {
 						baseColor = lipgloss.Color("220")
 					}
-					styledLeft = indentStr + lipgloss.NewStyle().Foreground(baseColor).Bold(true).Background(lipgloss.Color("235")).Render(icon+item.Name)
+					styledLeft = indentStr + lipgloss.NewStyle().Foreground(baseColor).Bold(true).Background(lipgloss.Color("235")).Render(icon+displayName)
 				}
 				styledConnector := faintStyle.Render(connector)
 				styledBadge := faintStyle.Render(age) + " " + diffBadgeStyle.Render("~")
@@ -1424,11 +1492,11 @@ func (m Model) View() string {
 				row := plainLeft + strings.Repeat(" ", padLen)
 				line = selectedStyle.Render(row)
 			} else if i == m.selected {
-				line = indentStr + iconStyle.Render(icon) + nameStyle.Underline(true).Render(item.Name)
+				line = indentStr + iconStyle.Render(icon) + nameStyle.Underline(true).Render(displayName)
 			} else if isHit {
-				line = indentStr + glowStyle.Bold(true).Render("▶ "+icon+item.Name)
+				line = indentStr + glowStyle.Bold(true).Render("▶ "+icon+displayName)
 			} else {
-				line = indentStr + iconStyle.Render(icon) + nameStyle.Render(item.Name)
+				line = indentStr + iconStyle.Render(icon) + nameStyle.Render(displayName)
 			}
 		}
 		leftLines = append(leftLines, clipStyle.Render(line))
@@ -1593,6 +1661,14 @@ func (m Model) View() string {
 			statusRight += " " + faintStyle.Render(fmt.Sprintf("Hit %d/%d", m.playhead+1, len(m.history)))
 		}
 	}
+	if m.errText != "" {
+		seg := errStyle.Render("✗ " + m.errText)
+		if statusRight != "" {
+			statusRight = seg + "  " + statusRight
+		} else {
+			statusRight = seg
+		}
+	}
 
 	var footerStr string
 	if m.searching {
@@ -1736,6 +1812,22 @@ func startEventDispatcher(getProg func() *tea.Program) chan<- tracer.Event {
 	return events
 }
 
+// startErrorDispatcher turns parsed crash records into TUI messages.
+func startErrorDispatcher(getProg func() *tea.Program) chan<- []tracer.TraceError {
+	errs := make(chan []tracer.TraceError, 16)
+	go func() {
+		for list := range errs {
+			if len(list) == 0 {
+				continue
+			}
+			if prog := getProg(); prog != nil {
+				prog.Send(TraceErrorsMsg{Errors: list})
+			}
+		}
+	}()
+	return errs
+}
+
 func Start(g *graph.Graph, projectRoot string) error {
 	m := NewModel(g, projectRoot)
 
@@ -1792,6 +1884,7 @@ func StartMonitor(g *graph.Graph, target string, projectRoot string) error {
 	// Active Listening: Error if socket/port is busy
 	var prog *tea.Program
 	eventChan := startEventDispatcher(func() *tea.Program { return prog })
+	errChan := startErrorDispatcher(func() *tea.Program { return prog })
 
 	listener, err := tracer.StartListener(projectRoot, func(e tracer.Event) {
 		eventChan <- e
@@ -1815,9 +1908,29 @@ func StartMonitor(g *graph.Graph, target string, projectRoot string) error {
 	if target != "" {
 		go func() {
 			time.Sleep(100 * time.Millisecond)
-			tracer.Run(target, func(e tracer.Event) {
-				eventChan <- e
+			diag := tracer.NewDiagnostics()
+			inCrash := false
+			push := func() {
+				if list := diag.Errors(); len(list) > 0 {
+					select {
+					case errChan <- list:
+					default:
+					}
+				}
+			}
+			_ = tracer.RunCommand(target, tracer.RunOptions{
+				OnEvent: func(e tracer.Event) { eventChan <- e },
+				OnDiagnostic: func(line string) {
+					diag.Add(line)
+					if tracer.LooksLikeCrash(line) {
+						inCrash = true
+					}
+					if inCrash {
+						push()
+					}
+				},
 			})
+			push()
 		}()
 	}
 

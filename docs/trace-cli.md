@@ -6,17 +6,64 @@ Every command operates on a recorded run (default: the most recent run) and supp
 
 ---
 
+## Choosing a subcommand
+
+Runs are produced by `cadr rec "<command>"` (timebox by wrapping cadr: `timeout 60s cadr rec "..."`).
+Everything below only *reads* runs. `last` is always a valid `--run` value, so `trace list` is often
+skippable.
+
+```
+cadr rec "<cmd>"  →  cadr trace list  →  summary  →  context  →  tree  →  diff | verify
+                                     (digest)     (pick a request)  (drill)
+```
+
+| You want to know | Command | What you get |
+| --- | --- | --- |
+| What runs do I have? | `cadr trace list` | id, start time, duration, exit code, event count, command |
+| Did it fail, and where? | `cadr trace summary` | `exit_code`, an `errors:` block with `file:line`, hottest functions |
+| Which request was slow? | `cadr trace context` | one line per context, hottest first |
+| What did that request do, in order? | `cadr trace tree --ctx <id>` | indented tree with per-function total + self time |
+| How slow is one function? | `cadr trace summary --fn <name>` | count / total / self / p95 / max |
+| Did my change alter behaviour? | `cadr trace diff <before> <after>` | added/removed functions, deltas, first divergence |
+| Can I trust this trace? | `cadr trace verify` | span pairing, seq integrity, open spans |
+| What does my change touch? | `cadr trace summary --graph` | plus `dynamic_only` / `static_unused` graph join |
+| Clean up old runs | `cadr trace clear --keep <n>` | keeps the newest n runs |
+
+Two caveats worth knowing:
+
+- `--fn` works for both: `summary --fn X` gives that function's stats, `tree --fn X` renders
+  that function's subtree (and errors if it never ran in the run).
+- The merged per-route view (`×N` call counts collapsed across requests) is available through the
+  MCP `trace_tree(route=...)` tool, not the CLI. The CLI is limited to `--ctx` and `--depth`.
+
+---
+
 ## Storage Layout
 
 Runs are recorded via `cadr rec <command>` and stored in `.cadr/traces/`:
 
 ```text
-.cadr/traces/
-  runs.json                # run index and metadata catalog
-  run_<id>.jsonl           # raw trace events (newline-delimited JSON)
+.cadr/traces/runs/
+  <id>.jsonl          # raw trace events (newline-delimited JSON)
+  <id>.meta.json      # manifest: cmd, exit code, duration, counts, error count
+  <id>.summary.json   # per-function / per-context / per-edge aggregates
+  <id>.errors.json    # crash records recovered from the run's stderr (when present)
+  <id>.stderr.log     # bounded stderr tail (when the process wrote any)
 ```
 
-Each run has a timestamped identifier (e.g., `run_20261005_120000`).
+Each run has a sortable timestamped identifier (e.g. `20261014T153301.412Z-9a4f5f`).
+`runs/` is the single source of truth for "the last run": there is no `last_run.jsonl` any
+more. A pre-v3 `last_run.jsonl` is adopted once as an orphan run so old traces stay visible,
+and `cadr trace clear` removes it.
+
+### Errors
+
+A panic or uncaught exception is recovered from the stderr of the recorded process, localized
+to a `file:line` (Go panic goroutine stacks and Python tracebacks are both parsed), and written
+to `<id>.errors.json`. `meta.json` also carries `error_count` and `first_error` so a failed run
+is identifiable from `cadr trace list`. `trace summary` and `trace verify` print an `errors:`
+section. `complete` means "the event stream is internally consistent", not "the run succeeded" —
+always read it next to `exit_code` and `error_count`.
 
 ---
 
@@ -57,7 +104,7 @@ cadr trace summary --json
 
 Flags:
 - `--run <id|last>`: Target run identifier (default: `last`).
-- `--fn <name>`: Filter rows by function name.
+- `--fn <name>`: One function — `summary` shows its stats, `tree` shows its subtree.
 - `--graph`: Join runtime metrics against the static dependency graph to show untraced/unreached callees.
 - `--window <n>`: Limit visible rows before truncation (default: `20`).
 - `--full`: Display all rows without truncation.
