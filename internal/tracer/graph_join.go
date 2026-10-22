@@ -9,6 +9,9 @@ import (
 // file:line. The dynamic side joins to it by line + file suffix, which is
 // robust to relative/absolute path differences and to method-name formatting.
 type StaticFunc struct {
+	// ID is the graph's qualified id (e.g. "handlers.ListBooks"), which is what a
+	// runtime stack reports. Name is the short name. Error localization prefers ID.
+	ID      string `json:"id,omitempty"`
 	Name    string `json:"name"`
 	File    string `json:"file"`
 	Line    int    `json:"line"`

@@ -52,24 +52,6 @@ type summaryOut struct {
 	Anomalies []tracer.Anomaly `json:"anomalies,omitempty"`
 }
 
-// contextRow is one request/goroutine in the structured context index.
-type contextRow struct {
-	Ctx   string `json:"ctx"`
-	Route string `json:"route,omitempty"`
-	Fn    string `json:"fn"`
-	DurNs int64  `json:"dur_ns"`
-	Spans int    `json:"spans"`
-}
-
-// contextOut is the structured form of trace_context.
-type contextOut struct {
-	traceEnvelope
-	Contexts        []contextRow `json:"contexts"`
-	IdleContexts    int          `json:"idle_contexts,omitempty"`
-	ContextsTotal   int          `json:"contexts_total"`
-	ContextsOmitted int          `json:"contexts_omitted,omitempty"`
-}
-
 // treeScopeOut names the slice a trace_tree result covers, so a client can tell a
 // scoped answer from a full-run dump.
 type treeScopeOut struct {

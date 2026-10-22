@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -103,8 +104,10 @@ type Model struct {
 	isLive       bool
 	isMonitoring bool
 	hitCounts    map[string]int  // ID -> count (enter events only)
-	errored      map[string]bool // ID -> a crash was localized here
-	errText      string          // most recent crash message, shown in the status bar
+	errored      map[string]bool // ID -> the function's latest invocation failed
+	erroredRows  map[int]bool    // history index -> that invocation failed
+	seenErrs     map[string]bool // crash record already applied
+	errText      string          // most recent crash message, right-pane footer
 	rightScroll  int
 
 	// Tree view bookkeeping (parallel to history, enter events only).
@@ -170,6 +173,8 @@ func NewModel(g *graph.Graph, projectRoot string) Model {
 		followLive:    true,
 		hitCounts:     make(map[string]int),
 		errored:       make(map[string]bool),
+		erroredRows:   make(map[int]bool),
+		seenErrs:      make(map[string]bool),
 		lastAtDepth:   make(map[string]map[int]int),
 		spanIndex:     make(map[int64]int),
 		spanCtx:       make(map[int64]string),
@@ -478,30 +483,215 @@ func getSignature(path string, line int) string {
 // m.history, the hit heatmap and the 'Hit N/M' counter enter-only, so existing
 // semantics are unchanged even though the wire now carries both halves.
 // applyTraceErrors localizes each crash to a graph node and turns that function red
-// in the tree. The newest message is kept for the status bar.
+// in the tree. The newest useful message is kept for the status bar.
+//
+// One failed import can print several tracebacks (uvicorn re-raises), so marks are
+// taken from every record and the *innermost resolvable* frame, while the status
+// text prefers a record that both resolves and carries a message.
 func (m *Model) applyTraceErrors(errs []tracer.TraceError) {
 	if len(errs) == 0 {
 		return
 	}
 	funcs := m.staticFuncs()
+
+	type pick struct {
+		e    tracer.TraceError
+		id   string
+		file string
+		line int
+	}
+	score := func(p pick) int {
+		s := 0
+		if p.id != "" {
+			s += 2
+		}
+		if p.e.Message != "" {
+			s++
+		}
+		return s
+	}
+	var best *pick
 	for _, e := range errs {
+		p := pick{e: e, file: e.File, line: e.Line}
+		for _, f := range framesInnermostFirst(e) {
+			if !m.inProject(f.File) {
+				continue // library/runtime frame: not ours to mark
+			}
+			// The innermost frame in project code is the answer, whether or not it
+			// resolves: never slide outward to a caller.
+			if id, ok := tracer.LookupContaining(funcs, f.File, f.Line); ok {
+				p.id, p.file, p.line = id, f.File, f.Line
+			}
+			break
+		}
+		// Only a complete record is authoritative: while a traceback is still arriving,
+		// the innermost frame received so far is a caller, and marking it would red a
+		// function that never failed. The message line lands last for Python and with
+		// the header for Go.
+		if p.id != "" && e.Message != "" {
+			// The same record arrives again on every later batch (cadr run re-sends the
+			// whole stderr ring), so an already-applied record must not re-mark a
+			// function that has since recovered.
+			if sig := errorSignature(e); !m.seenErrs[sig] {
+				m.seenErrs[sig] = true
+				m.markInvocation(p.id)
+			}
+		}
+		if best == nil || score(p) >= score(*best) {
+			pick := p
+			best = &pick
+		}
+	}
+
+	if best == nil {
+		return
+	}
+	m.errText = clipRunes(errorStatusText(best.e, best.file, best.line), 84)
+}
+
+// framesInnermostFirst returns the frames to try for localization, innermost first.
+// Go prints the failing frame first; Python's "most recent call last" prints it last.
+func framesInnermostFirst(e tracer.TraceError) []tracer.Frame {
+	if len(e.Frames) == 0 {
 		if e.File == "" {
-			continue
+			return nil
 		}
-		if id, ok := tracer.LookupFunc(funcs, e.File, e.Line); ok {
-			m.errored[id] = true
-		}
+		return []tracer.Frame{{Fn: e.Fn, File: e.File, Line: e.Line}}
 	}
-	last := errs[len(errs)-1]
-	msg := last.Message
+	if e.Kind != tracer.ErrException {
+		return e.Frames
+	}
+	out := make([]tracer.Frame, 0, len(e.Frames))
+	for i := len(e.Frames) - 1; i >= 0; i-- {
+		out = append(out, e.Frames[i])
+	}
+	return out
+}
+
+// errorStatusText renders the one-line status bar summary of a failure.
+func errorStatusText(e tracer.TraceError, file string, line int) string {
+	msg := e.Message
 	if msg == "" {
-		msg = "run failed"
+		msg = e.Kind
 	}
-	if last.File != "" {
-		// Keep the location: clip the message, never the file:line.
-		msg = clipRunes(msg, 40) + " · " + fmt.Sprintf("%s:%d", last.File, last.Line)
+	if msg == "" {
+		msg = "error"
 	}
-	m.errText = clipRunes(msg, 80)
+	if file == "" {
+		return msg
+	}
+	return msg + " · " + shortTail(file) + ":" + strconv.Itoa(line)
+}
+
+// shortTail keeps the last two path elements: enough to identify a file in the
+// status bar without pushing the message out of view.
+func shortTail(p string) string {
+	parts := strings.Split(filepath.ToSlash(p), "/")
+	if len(parts) <= 2 {
+		return p
+	}
+	return strings.Join(parts[len(parts)-2:], "/")
+}
+
+// inProject reports whether a frame's file belongs to the analyzed project. Library,
+// runtime and site-packages frames are skipped so localization cannot walk out of the
+// user's code.
+func (m *Model) inProject(file string) bool {
+	if file == "" {
+		return false
+	}
+	f, err := filepath.Abs(file)
+	if err != nil {
+		return false
+	}
+	root, err := filepath.Abs(m.projectRoot)
+	if err != nil {
+		return false
+	}
+	if underPath(f, root) {
+		return true
+	}
+	// macOS: the temp dir is /var/folders/... while its resolved form is
+	// /private/var/folders/..., so both sides must be resolved before comparing.
+	if resolved, rerr := filepath.EvalSymlinks(root); rerr == nil {
+		root = resolved
+	}
+	if dir, derr := filepath.EvalSymlinks(filepath.Dir(f)); derr == nil {
+		f = filepath.Join(dir, filepath.Base(f))
+	}
+	return underPath(f, root)
+}
+
+// underPath reports whether p is root or lives inside it.
+func underPath(p, root string) bool {
+	root = strings.TrimSuffix(root, string(filepath.Separator))
+	return p == root || strings.HasPrefix(p, root+string(filepath.Separator))
+}
+
+// markInvocation records a failure against the invocation that most recently ran the
+// function, and flags the function itself. A function stays flagged until it runs
+// again, so a later batch re-sending the same traceback cannot resurrect a function
+// that has since recovered.
+func (m *Model) markInvocation(id string) {
+	if id == "" {
+		return
+	}
+	m.errored[id] = true
+	for i := len(m.history) - 1; i >= 0; i-- {
+		if matchesFunctionName(m.history[i].Name, id) {
+			m.erroredRows[i] = true
+			return
+		}
+	}
+}
+
+// noteReentry clears the function-level mark when the function runs again: its latest
+// invocation is no longer known to have failed. Historical rows keep their mark.
+func (m *Model) noteReentry(name string) {
+	for id := range m.errored {
+		if matchesFunctionName(name, id) {
+			delete(m.errored, id)
+		}
+	}
+}
+
+// errorSignature identifies one crash record across batches.
+func errorSignature(e tracer.TraceError) string {
+	return e.Kind + "|" + e.Message + "|" + e.Fn + "|" + strconv.Itoa(e.Line)
+}
+
+// rowErrored reports whether any invocation in the group failed.
+func (m *Model) rowErrored(g flowGroup) bool {
+	for i := g.start; i <= g.end; i++ {
+		if m.erroredRows[i] {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesFunctionName compares a trace/event name with a graph node id, either of
+// which may be qualified.
+func matchesFunctionName(name, id string) bool {
+	if name == "" || id == "" {
+		return false
+	}
+	return name == id || strings.HasSuffix(id, "."+name) || strings.HasSuffix(name, "."+id)
+}
+
+// isErrored reports whether a function name refers to a function where the run
+// failed. Trace events carry either a short name or a qualified one while
+// m.errored is keyed by graph node id, so compare on a dotted suffix.
+func (m *Model) isErrored(name string) bool {
+	if name == "" || len(m.errored) == 0 {
+		return false
+	}
+	for id := range m.errored {
+		if id == name || strings.HasSuffix(id, "."+name) || strings.HasSuffix(name, "."+id) {
+			return true
+		}
+	}
+	return false
 }
 
 // staticFuncs exposes the graph as source ranges, keyed by node ID so a resolved
@@ -510,10 +700,19 @@ func (m *Model) staticFuncs() []tracer.StaticFunc {
 	out := make([]tracer.StaticFunc, 0, len(m.graph.Nodes))
 	for _, n := range m.graph.Nodes {
 		if n.Type == graph.FunctionNode {
-			out = append(out, tracer.StaticFunc{Name: n.ID, File: n.Path, Line: n.Line, EndLine: n.EndLine})
+			out = append(out, tracer.StaticFunc{ID: n.ID, Name: n.Name, File: n.Path, Line: n.Line, EndLine: n.EndLine})
 		}
 	}
 	return out
+}
+
+// fitLine truncates s to at most width terminal cells, adding an ellipsis when it
+// cuts. Counted in runes so a bar can never exceed the terminal width.
+func fitLine(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	return clipRunes(s, width)
 }
 
 // clipRunes truncates s to at most n runes, adding an ellipsis when it cuts.
@@ -562,7 +761,10 @@ func (m *Model) applyTraceEvent(e tracer.Event) {
 		return
 	}
 
-	// Enter (legacy v1 events normalize to enter).
+	// Enter (legacy v1 events normalize to enter). A function that runs again is no
+	// longer known to be broken; the tree red clears while old Flow rows keep theirs.
+	m.noteReentry(e.Name)
+
 	ctx := e.Ctx
 	stack := m.ctxStack[ctx]
 	depth := len(stack)
@@ -800,7 +1002,15 @@ func (m *Model) renderFlowRow(g flowGroup) string {
 	case self > 0:
 		nameStyle = heatLow
 	}
-	name := marker + nameStyle.Render(hit.Name)
+	// Only the invocation that actually failed is marked; the function's later runs
+	// stay normal.
+	isErr := m.rowErrored(g)
+	errMark := ""
+	if isErr {
+		nameStyle = errStyle
+		errMark = "✗ "
+	}
+	name := marker + errMark + nameStyle.Render(hit.Name)
 	if n := g.end - g.start + 1; n > 1 {
 		name += " " + faintStyle.Render(fmt.Sprintf("×%d", n))
 	}
@@ -818,7 +1028,13 @@ func (m *Model) renderFlowRow(g flowGroup) string {
 	}
 	line := fmt.Sprintf("%s#%d %s%s%s", cursor, g.start+1, bars, conn, name)
 	if focused {
-		line = glowStyle.Render(line)
+		// Red must survive the focus glow, or the failing row loses its colour
+		// exactly when it is selected.
+		if isErr {
+			line = errStyle.Render(line)
+		} else {
+			line = glowStyle.Render(line)
+		}
 	}
 	return line
 }
@@ -1289,8 +1505,14 @@ func (m Model) View() string {
 		return "Initializing..."
 	}
 
-	// 1. Title bar
-	title := faintStyle.Render("cadr") + faintStyle.Render(" | ") + textStyle.Render("project: "+m.projectPath)
+	// 1. Title bar. The path is clipped so a long project can never push the bar
+	// past the terminal width (which used to clip it entirely).
+	pathBudget := m.width - len("cadr | ") - 1
+	if pathBudget < 12 {
+		pathBudget = 12
+	}
+	title := faintStyle.Render("cadr") + faintStyle.Render(" | ") +
+		textStyle.Render(fitLine("project: "+m.projectPath, pathBudget))
 	topBar := lipgloss.NewStyle().
 		Width(m.width).
 		Border(lipgloss.NormalBorder(), false, false, true, false).
@@ -1301,6 +1523,12 @@ func (m Model) View() string {
 	paneHeight := m.height - lipgloss.Height(topBar) - 5
 	if paneHeight < 0 {
 		paneHeight = 0
+	}
+	// The error footer occupies the last row of the right pane, so its content gets
+	// one fewer row (the left pane keeps the full height, keeping the panes aligned).
+	paneContent := paneHeight
+	if m.errText != "" && paneHeight > 0 {
+		paneContent = paneHeight - 1
 	}
 
 	halfWidth := m.width / 2
@@ -1537,11 +1765,11 @@ func (m Model) View() string {
 	rightLines = append(rightLines, "")
 
 	if m.rightMode == ModePreview {
-		previewLines := m.renderPreview(rightContentWidth, paneHeight-4)
+		previewLines := m.renderPreview(rightContentWidth, paneContent-4)
 		rightLines = append(rightLines, previewLines...)
 	} else if m.rightMode == ModeFlow {
 		groups := m.flowGroups()
-		visibleCount := paneHeight - 4
+		visibleCount := paneContent - 4
 		if visibleCount < 1 {
 			visibleCount = 1
 		}
@@ -1613,11 +1841,14 @@ func (m Model) View() string {
 		rightLines = append(rightLines, clipStyle.Render("  "+faintStyle.Render(fmt.Sprintf("No %s found", kindStr))))
 		rightLines = append(rightLines, clipStyle.Render("  "+faintStyle.Render("Press 'Space' to toggle Callers / Callees")))
 	}
-	if len(rightLines) > paneHeight {
-		rightLines = rightLines[:paneHeight]
+	if len(rightLines) > paneContent {
+		rightLines = rightLines[:paneContent]
 	}
-	for len(rightLines) < paneHeight {
+	for len(rightLines) < paneContent {
 		rightLines = append(rightLines, "")
+	}
+	if paneContent < paneHeight {
+		rightLines = append(rightLines, errStyle.Render("✗ "+fitLine(m.errText, rightContentWidth-3)))
 	}
 	rightPaneStr := lipgloss.JoinVertical(lipgloss.Top, rightLines...)
 	rightPane := paneStyle.Width(rightWidth).MaxWidth(rightWidth).Render(rightPaneStr)
@@ -1640,7 +1871,11 @@ func (m Model) View() string {
 	case ModeFlow:
 		modeName = "Flow"
 	}
-	statusLeft := " " + textStyle.Render(m.projectPath) + sep +
+	statusPathBudget := m.width / 3
+	if statusPathBudget < 12 {
+		statusPathBudget = 12
+	}
+	statusLeft := " " + textStyle.Render(fitLine(m.projectPath, statusPathBudget)) + sep +
 		lipgloss.NewStyle().Foreground(brightYellow).Render(m.languages)
 
 	if m.width >= 70 {
@@ -1661,15 +1896,6 @@ func (m Model) View() string {
 			statusRight += " " + faintStyle.Render(fmt.Sprintf("Hit %d/%d", m.playhead+1, len(m.history)))
 		}
 	}
-	if m.errText != "" {
-		seg := errStyle.Render("✗ " + m.errText)
-		if statusRight != "" {
-			statusRight = seg + "  " + statusRight
-		} else {
-			statusRight = seg
-		}
-	}
-
 	var footerStr string
 	if m.searching {
 		footerStr = lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Bold(true).Render(" / ") + m.searchText + " "
@@ -1682,8 +1908,11 @@ func (m Model) View() string {
 		footerStr = statusLeft + strings.Repeat(" ", gap) + statusRight
 	}
 
+	// MaxWidth is the safety net: the bar can never force the layout wider than the
+	// terminal, which is what used to clip the title bar.
 	bottomBar := lipgloss.NewStyle().
 		Width(m.width).
+		MaxWidth(m.width).
 		Border(lipgloss.NormalBorder(), true, false, false, false).
 		BorderForeground(lipgloss.Color("240")).
 		Foreground(lipgloss.Color("252")).
@@ -1835,8 +2064,14 @@ func Start(g *graph.Graph, projectRoot string) error {
 	var prog *tea.Program
 	eventChan := startEventDispatcher(func() *tea.Program { return prog })
 
-	listener, _ := tracer.StartListener(projectRoot, func(e tracer.Event) {
+	errChan := startErrorDispatcher(func() *tea.Program { return prog })
+	listener, _ := tracer.StartListenerWithRootDiag(projectRoot, func(e tracer.Event) {
 		eventChan <- e
+	}, func(errs []tracer.TraceError) {
+		select {
+		case errChan <- errs:
+		default:
+		}
 	})
 	if listener != nil {
 		defer listener.Close()

@@ -102,7 +102,7 @@ func parseTraceFlags(args []string) traceFlags {
 }
 
 func traceUsage() {
-	fmt.Println("usage: cadr trace <list|summary|tree|diff|context|verify|clear> [flags]")
+	fmt.Println("usage: cadr trace <list|summary|tree|diff|verify|clear> [flags]")
 	fmt.Println("  --run <id|last>   select a run (default: last)")
 	fmt.Println("  --json            machine-readable output (see docs/trace-cli.md)")
 	fmt.Println("  --full            do not truncate lists")
@@ -132,8 +132,6 @@ func runTraceCmd(args []string) {
 		traceTree(rest)
 	case "diff":
 		traceDiff(rest)
-	case "context", "ctx":
-		traceContext(rest)
 	case "verify":
 		traceVerify(rest)
 	case "clear", "rm":
@@ -161,7 +159,7 @@ func traceList(args []string) {
 		fmt.Println("no runs recorded yet. Run `cadr rec \"<command>\"` first.")
 		return
 	}
-	fmt.Printf("%-28s %-20s %9s %4s %7s  %s\n", "RUN", "STARTED", "DURATION", "EXIT", "EVENTS", "CMD")
+	fmt.Printf("%-28s %-20s %9s %4s %7s %4s  %s\n", "RUN", "STARTED", "DURATION", "EXIT", "EVENTS", "ERR", "CMD")
 	limit := len(metas)
 	if !f.full && limit > f.window {
 		limit = f.window
@@ -171,7 +169,7 @@ func traceList(args []string) {
 		if t, err := time.Parse(time.RFC3339Nano, m.Started); err == nil {
 			started = t.Local().Format("2006-01-02 15:04:05")
 		}
-		fmt.Printf("%-28s %-20s %9s %4d %7d  %s\n", m.ID, started, humanMs(m.DurationMs), m.ExitCode, m.EventCount, m.Cmd)
+		fmt.Printf("%-28s %-20s %9s %4d %7d %4d  %s\n", m.ID, started, humanMs(m.DurationMs), m.ExitCode, m.EventCount, m.ErrorCount, m.Cmd)
 	}
 	if limit < len(metas) {
 		fmt.Printf("... %d more (use --full)\n", len(metas)-limit)
@@ -322,9 +320,9 @@ func traceSummary(args []string) {
 		printFnTable([]tracer.FnStat{s}, true)
 		return
 	}
-	fmt.Printf("run %s  cmd=%q  events=%d enter=%d exit=%d duration=%s exit_code=%d complete=%v\n",
+	fmt.Printf("run %s  cmd=%q  events=%d enter=%d exit=%d duration=%s exit_code=%d complete=%v errors=%d\n",
 		run.ID, run.Meta.Cmd, run.Meta.EventCount, run.Meta.EnterCount, run.Meta.ExitCount,
-		humanMs(run.Meta.DurationMs), run.Meta.ExitCode, run.Meta.Complete)
+		humanMs(run.Meta.DurationMs), run.Meta.ExitCode, run.Meta.Complete, len(run.Errors))
 	fns := append([]tracer.FnStat(nil), run.Summary.Functions...)
 	sort.Slice(fns, func(i, j int) bool { return fns[i].Total > fns[j].Total })
 	limit := len(fns)
@@ -546,93 +544,6 @@ func traceDiff(args []string) {
 	}
 }
 
-func traceContext(args []string) {
-	f := parseTraceFlags(args)
-	run := loadRun(f.run)
-	forest := tracer.BuildForest(run.Events)
-	if f.json {
-		if f.ctx != "" {
-			printJSON(treeJSON(run.ID, filterForest(forest, f.ctx)))
-			return
-		}
-		printJSON(contextsJSON(run.ID, forest))
-		return
-	}
-	if f.ctx == "" {
-		fmt.Printf("run %s: %d context(s)\n", run.ID, len(forest.Contexts))
-		for _, c := range forest.Contexts {
-			root := ""
-			var dur int64
-			for _, r := range c.Roots {
-				if r.Dur > dur {
-					dur = r.Dur
-					root = r.Event.Name
-				}
-			}
-			fmt.Printf("  ctx=%-16s root=%-28s dur=%s\n", c.Ctx, root, humanNs(dur))
-		}
-		return
-	}
-	for _, row := range forest.Flat {
-		if row.Ctx != f.ctx {
-			continue
-		}
-		if f.depth >= 0 && row.Depth > f.depth {
-			continue
-		}
-		dur := ""
-		if row.Node != nil && row.Node.Dur > 0 {
-			dur = " [" + humanNs(row.Node.Dur) + "]"
-		}
-		fmt.Printf("%s%s%s%s\n", strings.Repeat("  ", row.Depth), row.Ctx, row.Event.Name, dur)
-	}
-}
-
-// contextJSONOut is the machine shape for `cadr trace context --json`.
-type contextJSONOut struct {
-	Run      string         `json:"run"`
-	Schema   int            `json:"schema"`
-	Contexts []contextEntry `json:"contexts"`
-}
-
-type contextEntry struct {
-	Ctx        string `json:"ctx"`
-	Root       string `json:"root"`
-	DurationNs int64  `json:"duration_ns"`
-	Spans      int    `json:"spans"`
-}
-
-func contextsJSON(runID string, forest *tracer.Forest) contextJSONOut {
-	out := contextJSONOut{Run: runID, Schema: tracer.SchemaVersion}
-	for _, c := range forest.Contexts {
-		root := ""
-		var dur int64
-		for _, r := range c.Roots {
-			if r.Dur > dur {
-				dur = r.Dur
-				root = r.Event.Name
-			}
-		}
-		out.Contexts = append(out.Contexts, contextEntry{Ctx: c.Ctx, Root: root, DurationNs: dur, Spans: countNodes(c)})
-	}
-	return out
-}
-
-func countNodes(c *tracer.ContextTree) int {
-	n := 0
-	var rec func(*tracer.TreeNode)
-	rec = func(node *tracer.TreeNode) {
-		n++
-		for _, ch := range node.Children {
-			rec(ch)
-		}
-	}
-	for _, r := range c.Roots {
-		rec(r)
-	}
-	return n
-}
-
 // treeJSON is the machine shape for `cadr trace tree --json`.
 type treeJSONOut struct {
 	Run    string         `json:"run"`
@@ -702,7 +613,7 @@ func staticFuncs(root string) []tracer.StaticFunc {
 	var out []tracer.StaticFunc
 	for _, n := range res.Graph.Nodes {
 		if n.Type == graph.FunctionNode {
-			out = append(out, tracer.StaticFunc{Name: n.Name, File: n.Path, Line: n.Line, EndLine: n.EndLine})
+			out = append(out, tracer.StaticFunc{ID: n.ID, Name: n.Name, File: n.Path, Line: n.Line, EndLine: n.EndLine})
 		}
 	}
 	return out

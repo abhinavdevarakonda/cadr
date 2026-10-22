@@ -46,7 +46,7 @@ Add cadr to your client configuration:
 
 ## Available MCP Tools
 
-cadr exposes 17 tools grouped into three operational categories:
+cadr exposes 16 tools grouped into three operational categories:
 
 ### 1. Static Symbol & Graph Navigation
 - `set_project_root`: Point cadr at an active codebase root directory to rebuild or switch graph indexing.
@@ -64,14 +64,13 @@ cadr exposes 17 tools grouped into three operational categories:
 
 ### 3. Dynamic Tracing & Verification
 
-Runs are recorded with `cadr rec "<command>"` in a shell; the MCP server never executes commands. Read a run in three tiers, never as one dump:
+Runs are recorded with `cadr rec "<command>"` in a shell; the MCP server never executes commands. Read a run as a digest, then drill — never as one dump:
 
-**Digest → index → drill.** `trace_summary` (~30 lines: what ran, how slow, what failed), then `trace_context` (one line per request, hottest first, labelled with its HTTP route), then `trace_tree` scoped by `ctx=<id>`, `fn=<name>` or `route=<label>`. A whole-run tree of a busy server is thousands of interleaved rows and is refused by default.
+**Digest → drill.** `trace_summary` (~30 lines: what ran, how slow, what failed), then `trace_tree` scoped by `ctx=<id>`, `fn=<name>` or `route=<label>`. Unscoped output on a busy run does not dump rows: it lists the contexts (hottest first, labelled with the HTTP route when known) so you can pick a `ctx=`.
 
 - `get_last_trace`: The most recent run. Alias of `trace_summary(run="last")` — prints the run id, joins the static graph, and includes errors.
 - `trace_runs`: List all stored runs in `.cadr/traces/runs/` (id, start time, duration, exit code, events, error count).
 - `trace_summary`: Aggregated counts, total duration, self time and source location per function, plus `errors:`, `warnings:` and `trace anomalies:` sections.
-- `trace_context`: Execution contexts (goroutine/thread/task) of a run — the request index.
 - `trace_tree`: Indented call tree, scoped by `ctx`, `fn` or `route`.
 - `trace_diff`: Behavioral and latency delta between two recorded runs, including the first divergence.
 - `trace_verify`: Assert whether a run's internal invariants hold (span pairing, timing, seq integrity) plus the recorded errors.
@@ -82,8 +81,7 @@ Every trace tool returns both a text rendering (what the model reads) and a
 `structuredContent` envelope with the same numbers: `run_id`, `cmd`, `exit_code`,
 `complete`, `wall_ns`, `trace_ns`, `events` / `enter` / `exit`, `errors`, and the
 `full_run_file` path. `trace_summary` also carries the per-function `functions` array plus
-`warnings` / `anomalies`; `trace_context` carries the `contexts` array; `trace_tree` carries the
-`scope` it covers; `trace_verify` carries `ok` / `counts` / `violations`; `trace_diff` carries the
+`warnings` / `anomalies`; `trace_tree` carries the `scope` it covers; `trace_verify` carries `ok` / `counts` / `violations`; `trace_diff` carries the
 full diff object. Nothing has to be parsed out of padded columns.
 
 ### Errors are first-class

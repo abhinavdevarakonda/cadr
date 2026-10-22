@@ -59,43 +59,25 @@ func writeRoutes(t *testing.T, root string) {
 	}
 }
 
-// A server run lists one line per request, hottest first, labelled with its route.
-func TestFormatContextsListsRequests(t *testing.T) {
-	events := append(requestEvents("1", 1, 0), requestEvents("2", 10, 1000)...)
-	root, run := writeRun(t, events, 0)
-	writeRoutes(t, root)
-
-	entries, idle := ctxEntries(tracer.BuildForest(run.Events), root)
-	out := formatContexts(run, root, entries, idle, 20)
-	if !strings.Contains(out, "GET /books") {
-		t.Fatalf("route label missing:\n%s", out)
-	}
-	if !strings.Contains(out, "ctx=1") || !strings.Contains(out, "ctx=2") {
-		t.Fatalf("contexts missing:\n%s", out)
-	}
-	if !strings.Contains(out, "2 context(s)") {
-		t.Fatalf("context count missing:\n%s", out)
-	}
-	if !strings.Contains(out, "trace_tree") {
-		t.Fatalf("missing next-step hint:\n%s", out)
-	}
-}
-
-// An unscoped tree on a busy run must not dump thousands of merged rows.
-func TestFormatTreeRefusesToDumpManyContexts(t *testing.T) {
+// A busy run must not dump merged rows: it lists the contexts (with route labels when
+// known) so ctx=<id> stays discoverable without a separate tool.
+func TestFormatTreeListsContextsWhenBusy(t *testing.T) {
 	var events []tracer.Event
 	for i := 1; i <= 4; i++ {
 		events = append(events, requestEvents(string(rune('0'+i)), int64(i*10), int64(i*1000))...)
 	}
 	root, run := writeRun(t, events, 0)
-	forest := tracer.BuildForest(run.Events)
+	writeRoutes(t, root)
 
-	out := formatTree(run, forest, root, treeScope{}, -1, 200)
-	if !strings.Contains(out, "4 contexts") {
-		t.Fatalf("expected a refusal that names the context count:\n%s", out)
+	out := formatTree(run, tracer.BuildForest(run.Events), root, treeScope{}, -1, 200)
+	for _, want := range []string{"4 contexts", "ctx=1", "ctx=4", "GET /books", "pick one with ctx="} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
 	}
+	// The child invocation is not a context root, so no tree rows are dumped.
 	if strings.Contains(out, "store.QueryBooks") {
-		t.Fatalf("must not render rows for an unscoped busy run:\n%s", out)
+		t.Fatalf("rendered rows for an unscoped busy run:\n%s", out)
 	}
 }
 

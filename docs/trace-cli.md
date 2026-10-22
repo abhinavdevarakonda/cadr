@@ -21,7 +21,7 @@ cadr rec "<cmd>"  →  cadr trace list  →  summary  →  context  →  tree  �
 | --- | --- | --- |
 | What runs do I have? | `cadr trace list` | id, start time, duration, exit code, event count, command |
 | Did it fail, and where? | `cadr trace summary` | `exit_code`, an `errors:` block with `file:line`, hottest functions |
-| Which request was slow? | `cadr trace context` | one line per context, hottest first |
+| Which request was slow? | `cadr trace tree` (no `--ctx`) | lists the contexts, hottest first |
 | What did that request do, in order? | `cadr trace tree --ctx <id>` | indented tree with per-function total + self time |
 | How slow is one function? | `cadr trace summary --fn <name>` | count / total / self / p95 / max |
 | Did my change alter behaviour? | `cadr trace diff <before> <after>` | added/removed functions, deltas, first divergence |
@@ -59,8 +59,17 @@ and `cadr trace clear` removes it.
 ### Errors
 
 A panic or uncaught exception is recovered from the stderr of the recorded process, localized
-to a `file:line` (Go panic goroutine stacks and Python tracebacks are both parsed), and written
-to `<id>.errors.json`. `meta.json` also carries `error_count` and `first_error` so a failed run
+to a `file:line` (Go panic goroutine stacks, `net/http`-recovered handler panics, and Python
+tracebacks are all parsed), and written to `<id>.errors.json`. A handled error that leaves the
+process running is not a crash record; a panic that `net/http` recovers is, even though the run
+then exits 0. Stopping a server with Ctrl-C still records the crash seen just before it.
+In the two-process workflow (`cadr .` for the TUI, `cadr run "<cmd>"` for the app),
+`cadr run` forwards each crash to the listening TUI over the trace socket, so the TUI
+marks the failing function too.
+Localization takes the innermost frame that lives inside the project and marks the function whose
+source range contains that line; paths are compared tolerantly because the graph stores
+project-relative paths while a stack reports absolute ones. Frames in libraries or at module level
+resolve to no function, so they mark nothing rather than guessing a caller. `meta.json` also carries `error_count` and `first_error` so a failed run
 is identifiable from `cadr trace list`. `trace summary` and `trace verify` print an `errors:`
 section. `complete` means "the event stream is internally consistent", not "the run succeeded" —
 always read it next to `exit_code` and `error_count`.
@@ -155,19 +164,6 @@ Output highlights:
 - `+`: Functions called in run B that were not called in run A.
 - `-`: Functions called in run A that were absent in run B.
 - `~`: Functions with invocation count or execution time shifts.
-
----
-
-### `cadr trace context`
-Lists execution contexts (threads, goroutines, or async task IDs) present in a run.
-
-```bash
-cadr trace context
-cadr trace context --run <run_id>
-cadr trace context --json
-```
-
-Useful for debugging multi-threaded Python workloads, concurrent Go goroutines, or asynchronous Node.js task flows.
 
 ---
 

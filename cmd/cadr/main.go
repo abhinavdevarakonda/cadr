@@ -274,13 +274,55 @@ func main() {
 		// We don't need a callback here because the tracer itself
 		// (if it's our py_trace) will connect to the local socket
 		// server started by 'cadr flow'.
-		if err := tracer.RunWithLang(cmdStr, langOverride, func(e tracer.Event) {
-			// Fallback: If socket fails, we still see something here
-			fmt.Fprintf(os.Stderr, " [TRACE FALLBACK] %s\n", e.Name)
+		// Capture the child's stderr for crash records and forward them to a TUI
+		// listening on the socket (`cadr .` in another terminal) — the TUI only
+		// receives events otherwise, so it could never mark a failure.
+		diag := tracer.NewDiagnostics()
+		sender := tracer.NewDiagSender(tracer.LoadConfig("."))
+		defer sender.Close()
+		inCrash := false
+		lastSig := ""
+		// A crash record grows as its stack arrives (message, then frames), so send
+		// the whole current list whenever its shape changes; the TUI's handler is
+		// idempotent.
+		forward := func() {
+			errs := diag.Errors()
+			if len(errs) == 0 {
+				return
+			}
+			sig := fmt.Sprintf("%d", len(errs))
+			for _, e := range errs {
+				sig += fmt.Sprintf("|%s|%s|%s:%d|%d", e.Kind, e.Message, e.Fn, e.Line, len(e.Frames))
+			}
+			if sig == lastSig {
+				return
+			}
+			lastSig = sig
+			sender.Send(errs)
+		}
+		onDiag := func(line string) {
+			diag.Add(line)
+			fmt.Fprintln(os.Stderr, line) // keep showing the app's own output
+			if tracer.LooksLikeCrash(line) {
+				inCrash = true
+			}
+			if inCrash {
+				forward()
+			}
+		}
+		if err := tracer.RunCommand(cmdStr, tracer.RunOptions{
+			LangOverride: langOverride,
+			OnEvent: func(e tracer.Event) {
+				// Fallback: If socket fails, we still see something here
+				fmt.Fprintf(os.Stderr, " [TRACE FALLBACK] %s\n", e.Name)
+			},
+			OnDiagnostic: onDiag,
 		}); err != nil {
+			forward()
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
 		}
+		forward()
 
 	case "rec":
 		var langOverride string
@@ -318,11 +360,14 @@ func main() {
 			os.Exit(1)
 		}
 		// Finalize the run (write the manifest + summary) even when the user
-		// interrupts a long-running server with Ctrl-C.
+		// interrupts a long-running server with Ctrl-C. Diagnostics must be
+		// attached first, or the crash that was just logged is lost.
+		diag := tracer.NewDiagnostics()
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 		go func() {
 			<-sigCh
+			rw.SetDiagnostics(diag)
 			_ = rw.Close(130)
 			os.Exit(130)
 		}()
@@ -359,7 +404,6 @@ func main() {
 		}()
 
 		fmt.Fprintf(os.Stderr, "Recording trace to .cadr/traces/runs/%s.jsonl...\n", rw.ID())
-		diag := tracer.NewDiagnostics()
 		runErr := tracer.RunCommand(cmdStr, tracer.RunOptions{
 			LangOverride: langOverride,
 			OnEvent:      func(tracer.Event) {},

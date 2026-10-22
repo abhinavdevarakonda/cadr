@@ -157,40 +157,6 @@ func countContextNodes(c *tracer.ContextTree) int {
 	return n
 }
 
-// formatContexts renders the request/context index: one line per request, hottest
-// first. This is the entry point for a server run, where the whole-run tree is
-// thousands of interleaved rows.
-func formatContexts(run *tracer.TraceRun, root string, entries []ctxEntry, idle, limit int) string {
-	var b strings.Builder
-	b.WriteString(formatRunHeader(run, len(run.Errors)))
-	b.WriteString(tracer.FormatErrors(run.Errors, root))
-
-	fmt.Fprintf(&b, "\n%d context(s)", len(entries))
-	if idle > 0 {
-		fmt.Fprintf(&b, " (+%d idle)", idle)
-	}
-	b.WriteString(" — one context is one request/goroutine\n")
-
-	total := len(entries)
-	if limit > 0 && len(entries) > limit {
-		fmt.Fprintf(&b, "showing %d of %d by duration (limit=N to raise)\n", limit, total)
-		entries = entries[:limit]
-	}
-	for _, e := range entries {
-		route := e.Route
-		if route == "" {
-			route = "-"
-		}
-		fmt.Fprintf(&b, "  ctx=%-5s %-24s %-32s %8s %4d spans\n",
-			e.Ctx, truncateName(route, 24), truncateName(e.Fn, 32), durStr(e.Dur), e.Spans)
-	}
-	if total > 0 {
-		fmt.Fprintf(&b, "\nnext: trace_tree(run=%q, ctx=<id>) for one request, or route=<label> for the merged view\n", run.ID)
-	}
-	b.WriteString("full run: " + runFilePath(run) + "\n")
-	return b.String()
-}
-
 // treeScope selects what trace_tree renders.
 type treeScope struct {
 	Ctx   string
@@ -309,18 +275,36 @@ func formatCtxTree(forest *tracer.Forest, ctxID string, depthLimit, maxRows int)
 		b.WriteString(truncationNote(st.rows, countNodesDepth(c.Roots, 0, depthLimit), maxRows))
 		return b.String()
 	}
-	return fmt.Sprintf("ctx %q not found in this run (see trace_context for the id list)\n", ctxID)
+	return fmt.Sprintf("ctx %q not found in this run (run trace_tree without ctx to list them)\n", ctxID)
 }
 
 // formatAllContexts renders every context, but only for a small run: dumping
 // thousands of interleaved rows is never an answer.
 func formatAllContexts(forest *tracer.Forest, root string, depthLimit, maxRows int) string {
-	entries, _ := ctxEntries(forest, root)
+	entries, idle := ctxEntries(forest, root)
 	if len(entries) > 3 {
 		var b strings.Builder
-		fmt.Fprintf(&b, "this run has %d contexts; a whole-run tree would be %d rows.\n", len(entries), len(forest.Flat))
-		fmt.Fprintf(&b, "pick one: trace_tree(ctx=<id>) for a single request, or trace_tree(route=<label>) for a merged endpoint view.\n")
-		fmt.Fprintf(&b, "call trace_context to list them.\n")
+		fmt.Fprintf(&b, "this run has %d contexts", len(entries))
+		if idle > 0 {
+			fmt.Fprintf(&b, " (+%d idle)", idle)
+		}
+		fmt.Fprintf(&b, "; a whole-run tree would be %d rows.\n", len(forest.Flat))
+		b.WriteString("pick one with ctx=<id>:\n")
+		limit := len(entries)
+		if limit > 10 {
+			limit = 10
+		}
+		for _, e := range entries[:limit] {
+			route := e.Route
+			if route == "" {
+				route = "-"
+			}
+			fmt.Fprintf(&b, "  ctx=%-5s %-24s %-32s %8s %4d spans\n",
+				e.Ctx, truncateName(route, 24), truncateName(e.Fn, 32), durStr(e.Dur), e.Spans)
+		}
+		if limit < len(entries) {
+			fmt.Fprintf(&b, "  ... %d more contexts\n", len(entries)-limit)
+		}
 		return b.String()
 	}
 	var b strings.Builder
@@ -511,7 +495,7 @@ func formatRouteTree(forest *tracer.Forest, root, routeLabel string, depthLimit,
 		}
 	}
 	if matched == 0 {
-		return fmt.Sprintf("no context matched route %q (routes come from .cadr/cache/endpoints.json; see trace_context for the label list)\n", routeLabel)
+		return fmt.Sprintf("no context matched route %q (run trace_tree without route to list the contexts and their labels)\n", routeLabel)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "route %s — %d request(s), merged call tree\n", routeLabel, matched)

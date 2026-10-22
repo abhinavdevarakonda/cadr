@@ -3,6 +3,7 @@ package tracer
 import (
 	"bufio"
 	"crypto/md5"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -53,6 +54,11 @@ func ResolveSocketPath(root string) string {
 	abs, err := filepath.Abs(root)
 	if err == nil {
 		root = abs
+	}
+	// Resolve symlinks so `cadr /tmp/app` and `cadr run` executed in
+	// /private/tmp/app (macOS) compute the same socket path.
+	if resolved, rerr := filepath.EvalSymlinks(root); rerr == nil {
+		root = resolved
 	}
 	root = filepath.Clean(root)
 	h := md5.Sum([]byte(root))
@@ -256,6 +262,96 @@ func RunCommand(fullCmd string, opts RunOptions) error {
 	return cmd.Wait()
 }
 
+// diagEnvelope marks a crash record on the event transport so a listener can tell it
+// apart from a trace event. `cadr run` uses it to forward what the child printed on
+// stderr to a TUI listening on the socket.
+type diagEnvelope struct {
+	Cadr   string       `json:"cadr"` // always "diag"
+	Errors []TraceError `json:"errors"`
+}
+
+// ParseDiagLine reports whether a transport line carries forwarded crash records.
+// The whole set travels in one line so a consumer can replace its view rather than
+// accumulate half-filled records as a stack grows.
+func ParseDiagLine(line []byte) ([]TraceError, bool) {
+	var env diagEnvelope
+	if err := json.Unmarshal(line, &env); err != nil || env.Cadr != "diag" {
+		return nil, false
+	}
+	return env.Errors, true
+}
+
+// SendDiagnostics forwards one batch of crash records to whatever is listening on
+// cfg. Prefer DiagSender when sending repeatedly: each batch must arrive in order,
+// and separate connections are handled by separate consumer goroutines.
+func SendDiagnostics(cfg Config, errs []TraceError) {
+	s := NewDiagSender(cfg)
+	defer s.Close()
+	s.Send(errs)
+}
+
+// DiagSender forwards crash records to a listener over a single connection, so
+// batches arrive in the order they were produced. A missing listener is not an
+// error: `cadr run` works without a TUI, and each Send retries the dial.
+type DiagSender struct {
+	mu   sync.Mutex
+	cfg  Config
+	conn net.Conn
+}
+
+// NewDiagSender returns a sender for cfg (connecting lazily).
+func NewDiagSender(cfg Config) *DiagSender { return &DiagSender{cfg: cfg} }
+
+// Send writes one batch of crash records, reconnecting once if the listener went
+// away.
+func (d *DiagSender) Send(errs []TraceError) {
+	if len(errs) == 0 {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	line, err := json.Marshal(diagEnvelope{Cadr: "diag", Errors: errs})
+	if err != nil {
+		return
+	}
+	line = append(line, '\n')
+	for attempt := 0; attempt < 2; attempt++ {
+		if d.conn == nil {
+			conn, derr := dialConfig(d.cfg)
+			if derr != nil {
+				return
+			}
+			d.conn = conn
+		}
+		if _, werr := d.conn.Write(line); werr == nil {
+			return
+		}
+		_ = d.conn.Close()
+		d.conn = nil
+	}
+}
+
+// Close releases the connection.
+func (d *DiagSender) Close() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.conn != nil {
+		_ = d.conn.Close()
+		d.conn = nil
+	}
+}
+
+func dialConfig(cfg Config) (net.Conn, error) {
+	if cfg.Protocol == "tcp" {
+		port := cfg.Port
+		if port == "" {
+			port = "9876"
+		}
+		return net.Dial("tcp", "localhost:"+port)
+	}
+	return net.Dial("unix", cfg.Socket)
+}
+
 type Listener struct {
 	net.Listener
 	socketPath string
@@ -274,11 +370,22 @@ func (l *Listener) Close() error {
 }
 
 func StartListener(root string, onEvent func(Event)) (*Listener, error) {
+	return StartListenerWithRootDiag(root, onEvent, nil)
+}
+
+// StartListenerWithRootDiag listens for events and forwarded crash records.
+func StartListenerWithRootDiag(root string, onEvent func(Event), onDiag func([]TraceError)) (*Listener, error) {
 	cfg := LoadConfig(root)
-	return StartListenerWithConfig(cfg, onEvent)
+	return StartListenerWithDiag(cfg, onEvent, onDiag)
 }
 
 func StartListenerWithConfig(cfg Config, onEvent func(Event)) (*Listener, error) {
+	return StartListenerWithDiag(cfg, onEvent, nil)
+}
+
+// StartListenerWithDiag is StartListenerWithConfig plus a sink for forwarded crash
+// records (`cadr run` sends them over the same socket as events).
+func StartListenerWithDiag(cfg Config, onEvent func(Event), onDiag func([]TraceError)) (*Listener, error) {
 	var ln net.Listener
 	var err error
 
@@ -313,7 +420,14 @@ func StartListenerWithConfig(cfg Config, onEvent func(Event)) (*Listener, error)
 				defer c.Close()
 				scanner := bufio.NewScanner(c)
 				for scanner.Scan() {
-					if e, ok := ParseEventLine([]byte(scanner.Text())); ok {
+					line := scanner.Bytes()
+					if errs, ok := ParseDiagLine(line); ok {
+						if onDiag != nil {
+							onDiag(errs)
+						}
+						continue
+					}
+					if e, ok := ParseEventLine(line); ok {
 						onEvent(e)
 					}
 				}

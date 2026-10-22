@@ -292,7 +292,7 @@ func NewMCPServer(results *ResultStore) *mcpserver.MCPServer {
 	s.AddTool(mcp.NewTool("trace_tree",
 		mcp.WithDescription("Indented call tree for a recorded run. Scope it with ctx=<id> (one request), fn=<name> (one function's subtree) or route=<label> (that route's requests merged into one tree with call counts). Unscoped output on a busy run tells you to pick a scope instead of dumping every row."),
 		mcp.WithString("run", mcp.Description("Run id or 'last' (default)")),
-		mcp.WithString("ctx", mcp.Description("Optional: only this execution context (one request/goroutine); see trace_context for ids")),
+		mcp.WithString("ctx", mcp.Description("Optional: only this execution context (one request/goroutine); the unscoped trace_tree output lists them")),
 		mcp.WithString("fn", mcp.Description("Optional: only this function's subtree, across the run")),
 		mcp.WithString("route", mcp.Description("Optional: merge every request to this route into one tree with per-edge counts")),
 		mcp.WithNumber("depth", mcp.Description("Max tree depth")),
@@ -342,35 +342,6 @@ func NewMCPServer(results *ResultStore) *mcpserver.MCPServer {
 		return mcp.NewToolResultStructured(out, formatDiffText(diff, a.ID, b.ID)), nil
 	})
 
-	s.AddTool(mcp.NewTool("trace_context",
-		mcp.WithDescription("Request/context index for a recorded run: one line per execution context (goroutine/thread/task), hottest first, labelled with the HTTP route when the handler is known. Start here for a server run, then call trace_tree with ctx=<id> or route=<label>."),
-		mcp.WithString("run", mcp.Description("Run id or 'last' (default)")),
-		mcp.WithNumber("limit", mcp.Description("Max contexts to list (default 20, hottest first)")),
-	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		res := results.Get()
-		run, err := loadRun(res.Root, request.GetString("run", "last"))
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		forest := tracer.BuildForest(run.Events)
-		entries, idle := ctxEntries(forest, res.Root)
-		limit := request.GetInt("limit", 20)
-
-		out := contextOut{
-			traceEnvelope: newEnvelope(run),
-			IdleContexts:  idle,
-			ContextsTotal: len(entries),
-		}
-		for i, e := range entries {
-			if limit > 0 && i >= limit {
-				out.ContextsOmitted = len(entries) - limit
-				break
-			}
-			out.Contexts = append(out.Contexts, contextRow{Ctx: e.Ctx, Route: e.Route, Fn: e.Fn, DurNs: e.Dur, Spans: e.Spans})
-		}
-		return mcp.NewToolResultStructured(out, formatContexts(run, res.Root, entries, idle, limit)), nil
-	})
-
 	s.AddTool(mcp.NewTool("trace_verify",
 		mcp.WithDescription("Check a recorded run's internal consistency (span pairing, timing, seq integrity). Returns ok plus errors/warnings; open spans are warnings for live servers."),
 		mcp.WithString("run", mcp.Description("Run id or 'last' (default)")),
@@ -416,7 +387,7 @@ func staticFuncs(g *graph.Graph) []tracer.StaticFunc {
 	var sf []tracer.StaticFunc
 	for _, n := range g.Nodes {
 		if n.Type == graph.FunctionNode {
-			sf = append(sf, tracer.StaticFunc{Name: n.Name, File: n.Path, Line: n.Line, EndLine: n.EndLine})
+			sf = append(sf, tracer.StaticFunc{ID: n.ID, Name: n.Name, File: n.Path, Line: n.Line, EndLine: n.EndLine})
 		}
 	}
 	return sf

@@ -49,6 +49,8 @@ cadr combines three systems into one terminal workspace:
     *(Python/Go: entries, exits, durations; JavaScript: entries only)*
 3. **Interactive TUI:** A dual-pane terminal interface that maps live runtime events onto the static codebase tree, rendering traffic heatmaps, chronological function calls, and dependency trees.
 
+Failures are surfaced in place: a crash (panic, uncaught Python exception, or a panic recovered by `net/http`) is captured from the run's stderr, attributed to the function that owns the failing source line, and marked with a red `✗` in both panes — the row that failed and the function that is currently broken. The `cadr trace` subcommands report the same errors (`cadr trace summary`, `trace verify`) and the MCP trace tools include an `errors:` section and a `structuredContent` envelope.
+
 ---
 
 ## Installation
@@ -128,9 +130,8 @@ cadr api                Launch the terminal API Explorer
 cadr mcp                Start the Model Context Protocol (MCP) server over stdio
 cadr trace list         List all recorded trace runs
 cadr trace summary      Display function execution metrics (count, total, self time)
-cadr trace tree         Print the nested execution call tree of the last run
+cadr trace tree         Print the call tree (--ctx <id>, --fn <name>); unscoped lists contexts
 cadr trace diff         Compare execution differences between two runs
-cadr trace context
 cadr trace verify       validate a run's internal stream invariants (--graph also joins against the static graph).
 cadr trace clear        Delete recorded trace runs
 cadr serve .            Start the local web graph visualizer (localhost:6433)
@@ -241,7 +242,7 @@ Core tools exposed to AI agents:
 - `get_node_source`: Read exact function source boundaries without reading entire files.
 - `get_last_trace`: Read the most recent recorded run. Record runs with `cadr rec "<command>"`.
 
-For the full 17-tool reference and agent prompts, see the [MCP Server Guide](docs/mcp.md).
+For the full 16-tool reference and agent prompts, see the [MCP Server Guide](docs/mcp.md).
 
 ---
 
@@ -250,6 +251,7 @@ For the full 17-tool reference and agent prompts, see the [MCP Server Guide](doc
 - **JavaScript coverage**: regex-based CJS instrumentation; ESM, eval/new Function, and expression-body arrows
    are not traced; no exit events/durations.
 - **Go Standalone Binaries:** `cadr run` instruments execution verbs (`go run`, `go test`). Standalone `go build` invocations are deliberately uninstrumented so production release binaries remain untouched.
+- **Error attribution:** only failures that `cadr` can see on stderr are recorded — uncaught panics/exceptions and panics recovered by `net/http`. An application that handles an error and keeps running leaves no crash record; the raw stderr tail is still kept in `.cadr/traces/runs/<id>.stderr.log`. Frames outside the project, or at module level, are not attributed to a function.
 - **Docker and Remote Containers:** When running target applications inside containers or remote environments, specify `--tcp` mode instead of Unix Domain Sockets so the tracer can route events over network interfaces.
 
 ---
