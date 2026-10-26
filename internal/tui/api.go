@@ -1,11 +1,16 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,6 +94,15 @@ func substitutePathParams(path string, params []frameworks.PathParam, values []s
 		if val == "" {
 			continue
 		}
+		placeholder := "[" + p.Name + "]"
+		if strings.Contains(res, placeholder) {
+			// Avoid producing `//` when the path already ends in a slash and
+			// the user typed a value with a leading slash. Only touch the
+			// unresolved token: external endpoints store full URLs where a
+			// `//` after the scheme is meaningful.
+			res = strings.ReplaceAll(res, "/"+placeholder, "/"+strings.TrimPrefix(val, "/"))
+			res = strings.ReplaceAll(res, placeholder, val)
+		}
 		rawPlaceholder := fmt.Sprintf("<%s:%s>", p.Type, p.Name)
 		res = strings.ReplaceAll(res, rawPlaceholder, val)
 		res = strings.ReplaceAll(res, fmt.Sprintf("<%s>", p.Name), val)
@@ -99,14 +113,58 @@ func substitutePathParams(path string, params []frameworks.PathParam, values []s
 	return res
 }
 
+// BodyKind is the request body encoding the user picked for an endpoint.
+// The empty value means JSON, so caches written before body modes existed keep
+// working unchanged.
+type BodyKind string
+
+const (
+	BodyJSON      BodyKind = "json"
+	BodyForm      BodyKind = "form"
+	BodyMultipart BodyKind = "multipart"
+	BodyRaw       BodyKind = "raw"
+)
+
+// normalized maps unknown/legacy values onto the JSON default.
+func (k BodyKind) normalized() BodyKind {
+	switch k {
+	case BodyForm, BodyMultipart, BodyRaw:
+		return k
+	default:
+		return BodyJSON
+	}
+}
+
+func bodyKindLabel(k BodyKind) string {
+	switch k.normalized() {
+	case BodyForm:
+		return "form"
+	case BodyMultipart:
+		return "multipart"
+	case BodyRaw:
+		return "raw"
+	default:
+		return "JSON"
+	}
+}
+
 // request persistence cache
 type SavedRequest struct {
 	PathParams  []string `json:"path_params"`
 	QueryParams string   `json:"query_params"`
 	Headers     string   `json:"headers"`
 	Body        string   `json:"body"`
+	BodyKind    BodyKind `json:"body_kind,omitempty"`  // empty ⇒ json
+	FileField   string   `json:"file_field,omitempty"` // multipart file part name
+	FilePath    string   `json:"file_path,omitempty"`  // multipart file to upload
 	HitCount    int      `json:"hit_count"`
 	LastCalled  string   `json:"last_called"`
+}
+
+// endpointKey identifies a saved request in both the local api_cache.json and
+// the global external_endpoints.json.
+func endpointKey(method, path string) string {
+	return method + ":" + path
 }
 
 type APICache map[string]SavedRequest
@@ -136,6 +194,9 @@ type ExternalEndpointRecord struct {
 	SavedQuery   string   `json:"saved_query,omitempty"`
 	SavedHeaders string   `json:"saved_headers,omitempty"`
 	SavedBody    string   `json:"saved_body,omitempty"`
+	SavedKind    BodyKind `json:"saved_body_kind,omitempty"`
+	SavedField   string   `json:"saved_file_field,omitempty"`
+	SavedPath    string   `json:"saved_file_path,omitempty"`
 	HitCount     int      `json:"hit_count,omitempty"`
 	LastCalled   string   `json:"last_called,omitempty"`
 }
@@ -196,7 +257,39 @@ func loadExternalEndpoints() []frameworks.Endpoint {
 	return endpoints
 }
 
-func saveExternalEndpointPersistence(method, urlStr string, savedParams []string, savedQuery, savedHeaders, savedBody string) {
+func readExternalEndpointRecords() ([]ExternalEndpointRecord, string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, ""
+	}
+	extPath := filepath.Join(home, ".cadr", "external_endpoints.json")
+	data, err := os.ReadFile(extPath)
+	if err != nil {
+		return nil, extPath
+	}
+
+	var records []ExternalEndpointRecord
+	if err := json.Unmarshal(data, &records); err != nil {
+		return nil, extPath
+	}
+	return records, extPath
+}
+
+func savedRequestFromExternalRecord(r ExternalEndpointRecord) SavedRequest {
+	return SavedRequest{
+		PathParams:  r.SavedParams,
+		QueryParams: r.SavedQuery,
+		Headers:     r.SavedHeaders,
+		Body:        r.SavedBody,
+		BodyKind:    r.SavedKind,
+		FileField:   r.SavedField,
+		FilePath:    r.SavedPath,
+		HitCount:    r.HitCount,
+		LastCalled:  r.LastCalled,
+	}
+}
+
+func saveExternalEndpointPersistence(method, urlStr string, saved SavedRequest) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return
@@ -213,10 +306,13 @@ func saveExternalEndpointPersistence(method, urlStr string, savedParams []string
 
 	for i, r := range records {
 		if r.Method == method && r.Path == urlStr {
-			records[i].SavedParams = savedParams
-			records[i].SavedQuery = savedQuery
-			records[i].SavedHeaders = savedHeaders
-			records[i].SavedBody = savedBody
+			records[i].SavedParams = saved.PathParams
+			records[i].SavedQuery = saved.QueryParams
+			records[i].SavedHeaders = saved.Headers
+			records[i].SavedBody = saved.Body
+			records[i].SavedKind = saved.BodyKind.normalized()
+			records[i].SavedField = saved.FileField
+			records[i].SavedPath = saved.FilePath
 			records[i].HitCount++
 			records[i].LastCalled = time.Now().Format(time.RFC3339)
 			break
@@ -230,34 +326,25 @@ func saveExternalEndpointPersistence(method, urlStr string, savedParams []string
 }
 
 func loadExternalEndpointPersistence(method, urlStr string) (SavedRequest, bool) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return SavedRequest{}, false
-	}
-	extPath := filepath.Join(home, ".cadr", "external_endpoints.json")
-	data, err := os.ReadFile(extPath)
-	if err != nil {
-		return SavedRequest{}, false
-	}
-
-	var records []ExternalEndpointRecord
-	if err := json.Unmarshal(data, &records); err != nil {
-		return SavedRequest{}, false
-	}
-
+	records, _ := readExternalEndpointRecords()
 	for _, r := range records {
 		if r.Method == method && r.Path == urlStr {
-			return SavedRequest{
-				PathParams:  r.SavedParams,
-				QueryParams: r.SavedQuery,
-				Headers:     r.SavedHeaders,
-				Body:        r.SavedBody,
-				HitCount:    r.HitCount,
-				LastCalled:  r.LastCalled,
-			}, true
+			return savedRequestFromExternalRecord(r), true
 		}
 	}
 	return SavedRequest{}, false
+}
+
+// loadExternalSavedRequests returns every saved external request keyed by
+// endpointKey, so the list view can render hit counts without re-reading the
+// file per row.
+func loadExternalSavedRequests() map[string]SavedRequest {
+	saved := make(map[string]SavedRequest)
+	records, _ := readExternalEndpointRecords()
+	for _, r := range records {
+		saved[endpointKey(r.Method, r.Path)] = savedRequestFromExternalRecord(r)
+	}
+	return saved
 }
 
 type APIScreen int
@@ -284,6 +371,21 @@ type APIConfig struct {
 	FlaskURL   string
 	FastAPIURL string
 	GinURL     string
+	NodeURL    string
+
+	// RequestTimeout caps a single API call. Zero means the built-in default
+	// (10s), so models constructed in tests keep working.
+	RequestTimeout time.Duration
+}
+
+// defaultRequestTimeout matches the historical hardcoded value in sendRequest.
+const defaultRequestTimeout = 10 * time.Second
+
+func (c APIConfig) requestTimeout() time.Duration {
+	if c.RequestTimeout > 0 {
+		return c.RequestTimeout
+	}
+	return defaultRequestTimeout
 }
 
 // TUI model definition
@@ -315,19 +417,28 @@ type APIModel struct {
 	tempFileIsBody       bool
 
 	// form & interactive input states
-	focusIdx    int
-	formEditing bool
-	selectedAll bool
-	pathInputs  []textinput.Model
-	queryInput  textinput.Model
-	headerInput textinput.Model
-	bodyInput   textarea.Model
+	focusIdx       int
+	formEditing    bool
+	selectedAll    bool
+	bodyKind       BodyKind
+	pathInputs     []textinput.Model
+	queryInput     textinput.Model
+	headerInput    textinput.Model
+	bodyInput      textarea.Model
+	fileFieldInput textinput.Model
+	filePathInput  textinput.Model
+
+	// saved request caches, refreshed after every save instead of being
+	// re-read from disk per rendered row
+	cache         APICache
+	externalCache map[string]SavedRequest
 
 	// background http runner states
 	loading         bool
 	latency         time.Duration
 	statusCode      int
 	responseBody    string
+	responseErr     string
 	responseHeaders http.Header
 }
 
@@ -337,6 +448,8 @@ type responseMsg struct {
 	body       string
 	headers    http.Header
 	err        error
+	timedOut   bool
+	timeout    time.Duration
 }
 
 func (m APIModel) Init() tea.Cmd {
@@ -352,11 +465,9 @@ func (m *APIModel) initForm() {
 	var saved SavedRequest
 	var hasSaved bool
 	if ep.Framework == "external" {
-		saved, hasSaved = loadExternalEndpointPersistence(ep.Method, ep.Path)
+		saved, hasSaved = m.externalCache[endpointKey(ep.Method, ep.Path)]
 	} else {
-		cache := loadCache()
-		key := ep.Method + ":" + ep.Path
-		saved, hasSaved = cache[key]
+		saved, hasSaved = m.cache[endpointKey(ep.Method, ep.Path)]
 	}
 
 	halfWidth := m.width / 2
@@ -364,11 +475,20 @@ func (m *APIModel) initForm() {
 		halfWidth = 40
 	}
 
+	m.bodyKind = BodyJSON
+	if hasSaved {
+		m.bodyKind = saved.BodyKind.normalized()
+	}
+
 	// dynamic path parameters fields mapping
 	m.pathInputs = make([]textinput.Model, len(ep.PathParams))
 	for i, p := range ep.PathParams {
 		ti := textinput.New()
-		ti.Placeholder = fmt.Sprintf("type: %s", p.Type)
+		if p.Type == frameworks.UnresolvedPathParamType {
+			ti.Placeholder = "unresolved in source — e.g. /api/v1"
+		} else {
+			ti.Placeholder = fmt.Sprintf("type: %s", p.Type)
+		}
 		ti.Prompt = fmt.Sprintf("  %s: ", p.Name)
 		if hasSaved && i < len(saved.PathParams) {
 			ti.SetValue(saved.PathParams[i])
@@ -391,14 +511,30 @@ func (m *APIModel) initForm() {
 	}
 
 	m.bodyInput = textarea.New()
-	m.bodyInput.Placeholder = `{"key": "value"}`
 	m.bodyInput.SetWidth(halfWidth - 4)
 	m.bodyInput.SetHeight(4)
 	if hasSaved {
 		m.bodyInput.SetValue(saved.Body)
 	}
 
+	m.fileFieldInput = textinput.New()
+	m.fileFieldInput.Placeholder = "file"
+	m.fileFieldInput.Prompt = "  "
+	if hasSaved {
+		m.fileFieldInput.SetValue(saved.FileField)
+	}
+
+	m.filePathInput = textinput.New()
+	m.filePathInput.Placeholder = "./photo.png"
+	m.filePathInput.Prompt = "  "
+	if hasSaved {
+		m.filePathInput.SetValue(saved.FilePath)
+	}
+
+	m.applyBodyKindPresentation()
+
 	m.responseBody = ""
+	m.responseErr = ""
 	m.statusCode = 0
 	m.loading = false
 	m.responseScrollY = 0
@@ -407,34 +543,119 @@ func (m *APIModel) initForm() {
 	m.updateFocus()
 }
 
+// applyBodyKindPresentation keeps the shared body textarea's placeholder in
+// sync with the selected mode.
+func (m *APIModel) applyBodyKindPresentation() {
+	switch m.bodyKind.normalized() {
+	case BodyForm:
+		m.bodyInput.Placeholder = "key=value (one per line)"
+	case BodyMultipart:
+		m.bodyInput.Placeholder = "key=value fields (optional)"
+	case BodyRaw:
+		m.bodyInput.Placeholder = "raw body (text/plain unless a Content-Type header is set)"
+	default:
+		m.bodyInput.Placeholder = `{"key": "value"}`
+	}
+}
+
+// cycleBodyKind advances json → form → multipart → raw → json. Only methods
+// that accept a body have a body section, so the key is a no-op otherwise.
+func (m *APIModel) cycleBodyKind() {
+	if !m.methodSupportsBody() {
+		return
+	}
+	switch m.bodyKind.normalized() {
+	case BodyJSON:
+		m.bodyKind = BodyForm
+	case BodyForm:
+		m.bodyKind = BodyMultipart
+	case BodyMultipart:
+		m.bodyKind = BodyRaw
+	default:
+		m.bodyKind = BodyJSON
+	}
+	m.applyBodyKindPresentation()
+	if m.focusIdx >= m.fieldCount() {
+		m.focusIdx = m.fieldCount() - 1
+	}
+	m.updateFocus()
+}
+
+// field index helpers — focus is a single integer over a dynamic row list, so
+// every site must agree on where Query/Headers/Body/File rows start.
+func (m *APIModel) queryIdx() int { return len(m.pathInputs) }
+
+func (m *APIModel) headerIdx() int { return len(m.pathInputs) + 1 }
+
+// bodyFieldIdx is -1 when the current method takes no body.
+func (m *APIModel) bodyFieldIdx() int {
+	if !m.methodSupportsBody() {
+		return -1
+	}
+	return len(m.pathInputs) + 2
+}
+
+// fileFieldIdx and filePathIdx only exist in multipart mode.
+func (m *APIModel) fileFieldIdx() int {
+	if m.bodyFieldIdx() < 0 || m.bodyKind.normalized() != BodyMultipart {
+		return -1
+	}
+	return len(m.pathInputs) + 3
+}
+
+func (m *APIModel) filePathIdx() int {
+	if m.fileFieldIdx() < 0 {
+		return -1
+	}
+	return len(m.pathInputs) + 4
+}
+
+func (m *APIModel) fieldCount() int {
+	count := len(m.pathInputs) + 2 // query + headers
+	if m.methodSupportsBody() {
+		count++
+	}
+	if m.fileFieldIdx() >= 0 {
+		count += 2
+	}
+	return count
+}
+
 func (m *APIModel) updateFocus() {
-	hasBody := m.methodSupportsBody()
 	for i := range m.pathInputs {
 		m.pathInputs[i].Blur()
 	}
 	m.queryInput.Blur()
 	m.headerInput.Blur()
 	m.bodyInput.Blur()
+	m.fileFieldInput.Blur()
+	m.filePathInput.Blur()
 
-	if m.formEditing {
-		if m.focusIdx < len(m.pathInputs) {
-			m.pathInputs[m.focusIdx].Focus()
-		} else if m.focusIdx == len(m.pathInputs) {
-			m.queryInput.Focus()
-		} else if m.focusIdx == len(m.pathInputs)+1 {
-			m.headerInput.Focus()
-		} else if m.focusIdx == len(m.pathInputs)+2 && hasBody {
-			m.bodyInput.Focus()
-		}
+	if !m.formEditing {
+		return
+	}
+
+	if m.focusIdx < len(m.pathInputs) {
+		m.pathInputs[m.focusIdx].Focus()
+		return
+	}
+
+	switch m.focusIdx {
+	case m.queryIdx():
+		m.queryInput.Focus()
+	case m.headerIdx():
+		m.headerInput.Focus()
+	case m.bodyFieldIdx():
+		m.bodyInput.Focus()
+	case m.fileFieldIdx():
+		m.fileFieldInput.Focus()
+	case m.filePathIdx():
+		m.filePathInput.Focus()
 	}
 }
 
 func (m *APIModel) focusInput(idx int) {
-	hasBody := m.methodSupportsBody()
-	maxIdx := len(m.pathInputs) + 1
-	if hasBody {
-		maxIdx = len(m.pathInputs) + 2
-	}
+	maxIdx := m.fieldCount() - 1
 
 	if idx < 0 {
 		idx = maxIdx
@@ -451,39 +672,56 @@ func (m *APIModel) setSelectedAll(val bool) {
 	highlightStyle := lipgloss.NewStyle().Background(lipgloss.Color("7")).Foreground(lipgloss.Color("0"))
 	defaultStyle := lipgloss.NewStyle()
 
-	if val {
-		if m.focusIdx < len(m.pathInputs) {
-			m.pathInputs[m.focusIdx].TextStyle = highlightStyle
-		} else if m.focusIdx == len(m.pathInputs) {
-			m.queryInput.TextStyle = highlightStyle
-		} else if m.focusIdx == len(m.pathInputs)+1 {
-			m.headerInput.TextStyle = highlightStyle
-		} else if m.focusIdx == len(m.pathInputs)+2 && m.methodSupportsBody() {
-			m.bodyInput.FocusedStyle.Text = highlightStyle
-		}
-	} else {
-		for i := range m.pathInputs {
-			m.pathInputs[i].TextStyle = defaultStyle
-		}
-		m.queryInput.TextStyle = defaultStyle
-		m.headerInput.TextStyle = defaultStyle
-		m.bodyInput.FocusedStyle.Text = defaultStyle
+	for i := range m.pathInputs {
+		m.pathInputs[i].TextStyle = defaultStyle
+	}
+	m.queryInput.TextStyle = defaultStyle
+	m.headerInput.TextStyle = defaultStyle
+	m.fileFieldInput.TextStyle = defaultStyle
+	m.filePathInput.TextStyle = defaultStyle
+	m.bodyInput.FocusedStyle.Text = defaultStyle
+
+	if !val {
+		return
+	}
+
+	switch {
+	case m.focusIdx < len(m.pathInputs):
+		m.pathInputs[m.focusIdx].TextStyle = highlightStyle
+	case m.focusIdx == m.queryIdx():
+		m.queryInput.TextStyle = highlightStyle
+	case m.focusIdx == m.headerIdx():
+		m.headerInput.TextStyle = highlightStyle
+	case m.focusIdx == m.bodyFieldIdx():
+		m.bodyInput.FocusedStyle.Text = highlightStyle
+	case m.focusIdx == m.fileFieldIdx():
+		m.fileFieldInput.TextStyle = highlightStyle
+	case m.focusIdx == m.filePathIdx():
+		m.filePathInput.TextStyle = highlightStyle
 	}
 }
 
 func (m *APIModel) methodSupportsBody() bool {
-	ep := m.getCurrentEndpoint()
-	method := strings.ToUpper(ep.Method)
-	return method == "POST" || method == "PUT" || method == "PATCH"
+	switch strings.ToUpper(m.getCurrentEndpoint().Method) {
+	case "POST", "PUT", "PATCH", "DELETE", "OPTIONS":
+		return true
+	}
+	return false
 }
 
 func (m *APIModel) resolveTargetURL(ep frameworks.Endpoint) string {
-	if ep.Framework == "flask" {
+	switch ep.Framework {
+	case "flask":
 		return m.apiConfig.FlaskURL
-	} else if ep.Framework == "fastapi" {
+	case "fastapi":
 		return m.apiConfig.FastAPIURL
-	} else if ep.Framework == "gin" {
+	case "gin":
 		return m.apiConfig.GinURL
+	case "node":
+		if m.apiConfig.NodeURL != "" {
+			return m.apiConfig.NodeURL
+		}
+		return "http://localhost:3000"
 	}
 	return m.apiConfig.DefaultURL
 }
@@ -554,46 +792,291 @@ func (m *APIModel) applyFilter() {
 	m.selectedExternalIdx = 0
 }
 
+// requestSpec is everything needed to perform one API call. It is built from
+// the form or from a saved request, so both send sites share one code path.
+type requestSpec struct {
+	Method    string
+	URL       string
+	Headers   string // "Name: value" per line (comma-separated also accepted)
+	BodyKind  BodyKind
+	Body      string // json text | key=value lines | raw text
+	FileField string
+	FilePath  string
+	Timeout   time.Duration
+}
+
+// maxResponseBytes caps how much of a response body is kept in memory; larger
+// bodies are truncated with a notice in the response pane.
+const maxResponseBytes = 5 << 20 // 5 MiB
+
 // http request runner
-func sendRequest(method, urlStr string, bodyStr string, headersStr string) tea.Cmd {
+func sendRequest(spec requestSpec) tea.Cmd {
 	return func() tea.Msg {
 		start := time.Now()
-		var body io.Reader
-		if bodyStr != "" {
-			body = strings.NewReader(bodyStr)
-		}
 
-		req, err := http.NewRequestWithContext(context.Background(), method, urlStr, body)
+		body, contentType, err := buildRequestBody(spec)
 		if err != nil {
 			return responseMsg{err: err}
 		}
 
-		req.Header.Set("Content-Type", "application/json")
-
-		if headersStr != "" {
-			parts := strings.Split(headersStr, ",")
-			for _, part := range parts {
-				kv := strings.SplitN(part, ":", 2)
-				if len(kv) == 2 {
-					req.Header.Set(strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1]))
-				}
-			}
+		req, err := http.NewRequestWithContext(context.Background(), spec.Method, spec.URL, body)
+		if err != nil {
+			return responseMsg{err: err}
 		}
 
-		client := &http.Client{Timeout: 10 * time.Second}
+		// A user-supplied Content-Type always wins over the mode-derived one.
+		hasUserContentType := false
+		for _, header := range parseHeaderLines(spec.Headers) {
+			if strings.EqualFold(header[0], "Content-Type") {
+				hasUserContentType = true
+			}
+			req.Header.Set(header[0], header[1])
+		}
+		if !hasUserContentType && contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+
+		timeout := spec.Timeout
+		if timeout <= 0 {
+			timeout = defaultRequestTimeout
+		}
+		client := &http.Client{Timeout: timeout}
+
 		resp, err := client.Do(req)
 		if err != nil {
-			return responseMsg{err: err}
+			if isTimeoutError(err) {
+				return responseMsg{err: err, timedOut: true, timeout: timeout, latency: time.Since(start)}
+			}
+			return responseMsg{err: err, latency: time.Since(start)}
 		}
 		defer resp.Body.Close()
 
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+		notice := ""
+		if len(respBody) > maxResponseBytes {
+			respBody = respBody[:maxResponseBytes]
+			notice = fmt.Sprintf("\n\n[response truncated at %d MiB]", maxResponseBytes>>20)
+		}
+		if readErr != nil && len(respBody) == 0 {
+			return responseMsg{err: readErr, latency: time.Since(start)}
+		}
+
 		return responseMsg{
 			statusCode: resp.StatusCode,
 			latency:    time.Since(start),
-			body:       string(respBody),
+			body:       string(respBody) + notice,
 			headers:    resp.Header,
 		}
+	}
+}
+
+// buildRequestBody encodes the body for the selected mode and returns the
+// Content-Type that mode implies. A nil reader means "no body".
+func buildRequestBody(spec requestSpec) (io.Reader, string, error) {
+	switch spec.BodyKind.normalized() {
+	case BodyForm:
+		if spec.Body == "" {
+			return nil, "application/x-www-form-urlencoded", nil
+		}
+		return strings.NewReader(encodeFormBody(spec.Body)), "application/x-www-form-urlencoded", nil
+	case BodyMultipart:
+		buf := &bytes.Buffer{}
+		writer := multipart.NewWriter(buf)
+		for _, kv := range parseKeyValueLines(spec.Body) {
+			if err := writer.WriteField(kv[0], kv[1]); err != nil {
+				return nil, "", fmt.Errorf("multipart: %w", err)
+			}
+		}
+
+		filePath := strings.TrimSpace(spec.FilePath)
+		if filePath != "" {
+			fieldName := strings.TrimSpace(spec.FileField)
+			if fieldName == "" {
+				return nil, "", fmt.Errorf("multipart: set a file field name for %s", filePath)
+			}
+			file, err := os.Open(filePath)
+			if err != nil {
+				return nil, "", fmt.Errorf("multipart: cannot read %s: %w", filePath, err)
+			}
+			defer file.Close()
+
+			part, err := writer.CreateFormFile(fieldName, filepath.Base(filePath))
+			if err != nil {
+				return nil, "", fmt.Errorf("multipart: %w", err)
+			}
+			if _, err := io.Copy(part, file); err != nil {
+				return nil, "", fmt.Errorf("multipart: %w", err)
+			}
+		}
+
+		contentType := writer.FormDataContentType()
+		if err := writer.Close(); err != nil {
+			return nil, "", fmt.Errorf("multipart: %w", err)
+		}
+		return buf, contentType, nil
+	case BodyRaw:
+		if spec.Body == "" {
+			return nil, "text/plain", nil
+		}
+		return strings.NewReader(spec.Body), "text/plain", nil
+	default:
+		if spec.Body == "" {
+			return nil, "application/json", nil
+		}
+		return strings.NewReader(spec.Body), "application/json", nil
+	}
+}
+
+// parseKeyValueLines reads `key=value` lines (form fields and multipart text
+// parts). Blank lines and # comments are ignored.
+func parseKeyValueLines(body string) [][2]string {
+	var pairs [][2]string
+	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		kv := strings.SplitN(line, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		pairs = append(pairs, [2]string{strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1])})
+	}
+	return pairs
+}
+
+func encodeFormBody(body string) string {
+	values := url.Values{}
+	for _, kv := range parseKeyValueLines(body) {
+		values.Add(kv[0], kv[1])
+	}
+	return values.Encode()
+}
+
+// parseHeaderLines accepts one header per line and tolerates the historical
+// comma-separated form. A comma only starts a new header when it is followed
+// by `Name:`, so values like `Accept: a, b` stay intact.
+func parseHeaderLines(headersStr string) [][2]string {
+	var headers [][2]string
+	for _, line := range strings.Split(strings.ReplaceAll(headersStr, "\r\n", "\n"), "\n") {
+		for _, part := range splitHeaderLine(line) {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			kv := strings.SplitN(part, ":", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			name := strings.TrimSpace(kv[0])
+			if name == "" {
+				continue
+			}
+			headers = append(headers, [2]string{name, strings.TrimSpace(kv[1])})
+		}
+	}
+	return headers
+}
+
+func splitHeaderLine(line string) []string {
+	var parts []string
+	start := 0
+	for i := 0; i < len(line); i++ {
+		if line[i] != ',' {
+			continue
+		}
+		if looksLikeHeaderStart(line[i+1:]) {
+			parts = append(parts, line[start:i])
+			start = i + 1
+		}
+	}
+	parts = append(parts, line[start:])
+	return parts
+}
+
+func looksLikeHeaderStart(s string) bool {
+	s = strings.TrimLeft(s, " \t")
+	colon := strings.IndexByte(s, ':')
+	if colon <= 0 {
+		return false
+	}
+	for i := 0; i < colon; i++ {
+		c := s[i]
+		isNameChar := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '-' || c == '_'
+		if !isNameChar {
+			return false
+		}
+	}
+	return true
+}
+
+func isTimeoutError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return false
+}
+
+// persistence helpers shared by the send paths
+func (m *APIModel) refreshCaches() {
+	m.cache = loadCache()
+	m.externalCache = loadExternalSavedRequests()
+}
+
+func (m *APIModel) bodyValue() string {
+	if !m.methodSupportsBody() {
+		return ""
+	}
+	return m.bodyInput.Value()
+}
+
+func (m *APIModel) currentSavedRequest() SavedRequest {
+	pathVals := make([]string, 0, len(m.pathInputs))
+	for _, ti := range m.pathInputs {
+		pathVals = append(pathVals, ti.Value())
+	}
+	return SavedRequest{
+		PathParams:  pathVals,
+		QueryParams: m.queryInput.Value(),
+		Headers:     m.headerInput.Value(),
+		Body:        m.bodyValue(),
+		BodyKind:    m.bodyKind.normalized(),
+		FileField:   m.fileFieldInput.Value(),
+		FilePath:    m.filePathInput.Value(),
+	}
+}
+
+func (m *APIModel) persistCurrentRequest(ep frameworks.Endpoint, saved SavedRequest) {
+	if ep.Framework == "external" {
+		saveExternalEndpointPersistence(ep.Method, ep.Path, saved)
+		m.refreshCaches()
+		return
+	}
+
+	if m.cache == nil {
+		m.cache = loadCache()
+	}
+	saved.HitCount++
+	saved.LastCalled = time.Now().Format(time.RFC3339)
+	m.cache[endpointKey(ep.Method, ep.Path)] = saved
+	saveCache(m.cache)
+}
+
+func (m *APIModel) requestSpecFromSaved(ep frameworks.Endpoint, urlStr string, saved SavedRequest) requestSpec {
+	return requestSpec{
+		Method:    ep.Method,
+		URL:       urlStr,
+		Headers:   saved.Headers,
+		BodyKind:  saved.BodyKind.normalized(),
+		Body:      saved.Body,
+		FileField: saved.FileField,
+		FilePath:  saved.FilePath,
+		Timeout:   m.apiConfig.requestTimeout(),
 	}
 }
 
@@ -823,14 +1306,9 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+s":
 				ep := m.getCurrentEndpoint()
 				if ep.Method != "" {
-					var saved SavedRequest
-					var hasSaved bool
+					saved, hasSaved := m.cache[endpointKey(ep.Method, ep.Path)]
 					if ep.Framework == "external" {
-						saved, hasSaved = loadExternalEndpointPersistence(ep.Method, ep.Path)
-					} else {
-						cache := loadCache()
-						key := ep.Method + ":" + ep.Path
-						saved, hasSaved = cache[key]
+						saved, hasSaved = m.externalCache[endpointKey(ep.Method, ep.Path)]
 					}
 
 					if !hasSaved {
@@ -854,22 +1332,12 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 
 					m.loading = true
+					m.responseErr = ""
 					m.rightTab = TabResponse
 					m.responseScrollY = 0
 
-					if ep.Framework == "external" {
-						saveExternalEndpointPersistence(ep.Method, ep.Path, saved.PathParams, saved.QueryParams, saved.Headers, saved.Body)
-					} else {
-						cache := loadCache()
-						key := ep.Method + ":" + ep.Path
-						saved.HitCount++
-						saved.LastCalled = time.Now().Format(time.RFC3339)
-						cache[key] = saved
-						saveCache(cache)
-					}
-
-					cmd := sendRequest(ep.Method, urlStr, saved.Body, saved.Headers)
-					return m, cmd
+					m.persistCurrentRequest(ep, saved)
+					return m, sendRequest(m.requestSpecFromSaved(ep, urlStr, saved))
 				}
 			}
 			return m, nil
@@ -877,8 +1345,8 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if m.screen == FormScreen {
 			if m.formEditing {
-				// special key overrides for json body editor
-				if m.focusIdx == len(m.pathInputs)+2 && m.methodSupportsBody() {
+				// special key overrides for the body editor
+				if m.focusIdx == m.bodyFieldIdx() {
 					if key == "tab" {
 						m.bodyInput.InsertString("  ")
 						return m, nil
@@ -908,46 +1376,23 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.updateFocus()
 					return m, nil
 				case "enter":
-					if m.focusIdx != len(m.pathInputs)+2 || !m.methodSupportsBody() {
+					if m.focusIdx != m.bodyFieldIdx() {
 						m.formEditing = false
 						m.updateFocus()
 						return m, nil
 					}
 				case "ctrl+s":
 					m.loading = true
-					urlStr := m.getFinalURL()
 					ep := m.getCurrentEndpoint()
-					bodyVal := ""
-					if m.methodSupportsBody() {
-						bodyVal = m.bodyInput.Value()
-					}
-
-					var pathVals []string
-					for _, ti := range m.pathInputs {
-						pathVals = append(pathVals, ti.Value())
-					}
-
-					if ep.Framework == "external" {
-						saveExternalEndpointPersistence(ep.Method, ep.Path, pathVals, m.queryInput.Value(), m.headerInput.Value(), bodyVal)
-					} else {
-						cache := loadCache()
-						key := ep.Method + ":" + ep.Path
-						saved := cache[key]
-						saved.PathParams = pathVals
-						saved.QueryParams = m.queryInput.Value()
-						saved.Headers = m.headerInput.Value()
-						saved.Body = bodyVal
-						saved.HitCount++
-						saved.LastCalled = time.Now().Format(time.RFC3339)
-						cache[key] = saved
-						saveCache(cache)
-					}
+					saved := m.currentSavedRequest()
+					urlStr := m.getFinalURL()
+					m.persistCurrentRequest(ep, saved)
 
 					m.rightTab = TabResponse
+					m.responseErr = ""
 					m.responseScrollY = 0
 
-					cmd := sendRequest(ep.Method, urlStr, bodyVal, m.headerInput.Value())
-					return m, cmd
+					return m, sendRequest(m.requestSpecFromSaved(ep, urlStr, saved))
 				}
 			} else {
 				switch key {
@@ -985,8 +1430,11 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.formEditing = true
 					m.updateFocus()
 					return m, nil
+				case "b":
+					m.cycleBodyKind()
+					return m, nil
 				case "ctrl+e":
-					if m.focusIdx == len(m.pathInputs)+2 && m.methodSupportsBody() {
+					if m.focusIdx == m.bodyFieldIdx() {
 						tmpDir := filepath.Join(".cadr", "tmp")
 						_ = os.MkdirAll(tmpDir, 0755)
 						f, err := os.CreateTemp(tmpDir, "request-*.json")
@@ -1001,39 +1449,16 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				case "ctrl+s":
 					m.loading = true
-					urlStr := m.getFinalURL()
 					ep := m.getCurrentEndpoint()
-					bodyVal := ""
-					if m.methodSupportsBody() {
-						bodyVal = m.bodyInput.Value()
-					}
-
-					var pathVals []string
-					for _, ti := range m.pathInputs {
-						pathVals = append(pathVals, ti.Value())
-					}
-
-					if ep.Framework == "external" {
-						saveExternalEndpointPersistence(ep.Method, ep.Path, pathVals, m.queryInput.Value(), m.headerInput.Value(), bodyVal)
-					} else {
-						cache := loadCache()
-						key := ep.Method + ":" + ep.Path
-						saved := cache[key]
-						saved.PathParams = pathVals
-						saved.QueryParams = m.queryInput.Value()
-						saved.Headers = m.headerInput.Value()
-						saved.Body = bodyVal
-						saved.HitCount++
-						saved.LastCalled = time.Now().Format(time.RFC3339)
-						cache[key] = saved
-						saveCache(cache)
-					}
+					saved := m.currentSavedRequest()
+					urlStr := m.getFinalURL()
+					m.persistCurrentRequest(ep, saved)
 
 					m.rightTab = TabResponse
+					m.responseErr = ""
 					m.responseScrollY = 0
 
-					cmd := sendRequest(ep.Method, urlStr, bodyVal, m.headerInput.Value())
-					return m, cmd
+					return m, sendRequest(m.requestSpecFromSaved(ep, urlStr, saved))
 				}
 			}
 		}
@@ -1041,19 +1466,28 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case responseMsg:
 		m.loading = false
 		if msg.err != nil {
-			m.statusCode = 500
+			// Failures are not HTTP responses: keep the status empty instead of
+			// faking a 500, so a dead server never looks like a real error reply.
+			m.statusCode = 0
+			m.latency = msg.latency
+			m.responseHeaders = nil
+
 			ep := m.getCurrentEndpoint()
-			var target string
+			target := m.resolveTargetURL(ep)
 			if ep.Framework == "external" {
 				target = ep.Path
-			} else {
-				target = m.resolveTargetURL(ep)
 			}
-			m.responseBody = fmt.Sprintf("Error: %v\n\nIs your API server running at %s?", msg.err, target)
-			m.responseHeaders = nil
+
+			detail := msg.err.Error()
+			if msg.timedOut {
+				detail = fmt.Sprintf("timed out after %s — raise api_timeout in .cadr/config.yaml", msg.timeout)
+			}
+			m.responseErr = fmt.Sprintf("%s\n\nIs your API server running at %s?", detail, target)
+			m.responseBody = ""
 		} else {
 			m.statusCode = msg.statusCode
 			m.latency = msg.latency
+			m.responseErr = ""
 			m.responseBody = m.prettifyJSON(msg.body)
 			m.responseHeaders = msg.headers
 		}
@@ -1078,14 +1512,19 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if k != "ctrl+a" && k != "esc" && k != "ctrl+s" {
 					isNavigation := k == "left" || k == "right" || k == "up" || k == "down" || k == "home" || k == "end"
 					if !isNavigation {
-						if m.focusIdx < len(m.pathInputs) {
+						switch {
+						case m.focusIdx < len(m.pathInputs):
 							m.pathInputs[m.focusIdx].SetValue("")
-						} else if m.focusIdx == len(m.pathInputs) {
+						case m.focusIdx == m.queryIdx():
 							m.queryInput.SetValue("")
-						} else if m.focusIdx == len(m.pathInputs)+1 {
+						case m.focusIdx == m.headerIdx():
 							m.headerInput.SetValue("")
-						} else if m.focusIdx == len(m.pathInputs)+2 && m.methodSupportsBody() {
+						case m.focusIdx == m.bodyFieldIdx():
 							m.bodyInput.SetValue("")
+						case m.focusIdx == m.fileFieldIdx():
+							m.fileFieldInput.SetValue("")
+						case m.focusIdx == m.filePathIdx():
+							m.filePathInput.SetValue("")
 						}
 					}
 					m.setSelectedAll(false)
@@ -1093,17 +1532,24 @@ func (m APIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		if m.focusIdx < len(m.pathInputs) {
+		switch {
+		case m.focusIdx < len(m.pathInputs):
 			m.pathInputs[m.focusIdx], cmd = m.pathInputs[m.focusIdx].Update(msg)
 			cmds = append(cmds, cmd)
-		} else if m.focusIdx == len(m.pathInputs) {
+		case m.focusIdx == m.queryIdx():
 			m.queryInput, cmd = m.queryInput.Update(msg)
 			cmds = append(cmds, cmd)
-		} else if m.focusIdx == len(m.pathInputs)+1 {
+		case m.focusIdx == m.headerIdx():
 			m.headerInput, cmd = m.headerInput.Update(msg)
 			cmds = append(cmds, cmd)
-		} else if m.focusIdx == len(m.pathInputs)+2 && m.methodSupportsBody() {
+		case m.focusIdx == m.bodyFieldIdx():
 			m.bodyInput, cmd = m.bodyInput.Update(msg)
+			cmds = append(cmds, cmd)
+		case m.focusIdx == m.fileFieldIdx():
+			m.fileFieldInput, cmd = m.fileFieldInput.Update(msg)
+			cmds = append(cmds, cmd)
+		case m.focusIdx == m.filePathIdx():
+			m.filePathInput, cmd = m.filePathInput.Update(msg)
 			cmds = append(cmds, cmd)
 		}
 	}
@@ -1163,14 +1609,14 @@ func (m APIModel) View() string {
 		helpBar = faintStyle.Render(" j/k: navigate · enter: request builder · ctrl+s: execute · t/tab: toggle tab · q: quit")
 	} else {
 		if m.formEditing {
-			if m.focusIdx == len(m.pathInputs)+2 && m.methodSupportsBody() {
-				helpBar = faintStyle.Render(" esc: stop editing · ctrl+e: open in editor · ctrl+s: execute request")
+			if m.focusIdx == m.bodyFieldIdx() {
+				helpBar = faintStyle.Render(" esc: stop editing · tab: indent · ctrl+e: open in editor · ctrl+s: execute request")
 			} else {
 				helpBar = faintStyle.Render(" esc: stop editing · ctrl+s: execute request")
 			}
 		} else {
-			if m.focusIdx == len(m.pathInputs)+2 && m.methodSupportsBody() {
-				helpBar = faintStyle.Render(" q/H: back to list · j/k: navigate fields · enter: edit · ctrl+e: open in editor · ctrl+s: execute request")
+			if m.focusIdx == m.bodyFieldIdx() {
+				helpBar = faintStyle.Render(" q/H: back to list · b: cycle body mode · j/k: navigate fields · enter: edit · ctrl+e: open in editor · ctrl+s: execute request")
 			} else {
 				helpBar = faintStyle.Render(" q/H: back to list · j/k: navigate fields · enter: edit field · t/tab: toggle tab · ctrl+s: execute request")
 			}
@@ -1267,9 +1713,7 @@ func (m APIModel) leftListView(height int, width int) string {
 					pathStr = selectedStyle.Render(pathStr)
 				}
 
-				cache := loadCache()
-				key := ep.Method + ":" + ep.Path
-				saved, hasSaved := cache[key]
+				saved, hasSaved := m.cache[endpointKey(ep.Method, ep.Path)]
 				stats := ""
 				if hasSaved && saved.HitCount > 0 {
 					timeStr := "-"
@@ -1328,7 +1772,7 @@ func (m APIModel) leftListView(height int, width int) string {
 
 				method := methodStyle(ep.Method).Render(ep.Method)
 				var line2, line3 string
-				saved, hasSaved := loadExternalEndpointPersistence(ep.Method, ep.Path)
+				saved, hasSaved := m.externalCache[endpointKey(ep.Method, ep.Path)]
 
 				if ep.HandlerFunc != "" {
 					line2 = ep.HandlerFunc
@@ -1417,7 +1861,7 @@ func (m APIModel) leftFormView(height int, width int) string {
 
 	queryPrefix := "  "
 	queryHeaderStyle := headingStyle
-	if !m.focusRight && m.focusIdx == len(m.pathInputs) {
+	if !m.focusRight && m.focusIdx == m.queryIdx() {
 		queryPrefix = "> "
 		queryHeaderStyle = selectedStyle
 	}
@@ -1428,7 +1872,7 @@ func (m APIModel) leftFormView(height int, width int) string {
 
 	headerPrefix := "  "
 	headerHeaderStyle := headingStyle
-	if !m.focusRight && m.focusIdx == len(m.pathInputs)+1 {
+	if !m.focusRight && m.focusIdx == m.headerIdx() {
 		headerPrefix = "> "
 		headerHeaderStyle = selectedStyle
 	}
@@ -1440,18 +1884,40 @@ func (m APIModel) leftFormView(height int, width int) string {
 	if m.methodSupportsBody() {
 		bodyPrefix := "  "
 		bodyHeaderStyle := headingStyle
-		bodyText := "Body (JSON):"
-		if !m.focusRight && m.focusIdx == len(m.pathInputs)+2 {
+		bodyText := fmt.Sprintf("Body (%s)  [b: cycle]", bodyKindLabel(m.bodyKind))
+		if !m.focusRight && m.focusIdx == m.bodyFieldIdx() {
 			bodyPrefix = "> "
 			bodyHeaderStyle = selectedStyle
 			if m.formEditing {
-				bodyText = "Body (JSON) (Editing):"
+				bodyText = fmt.Sprintf("Body (%s) (Editing):", bodyKindLabel(m.bodyKind))
 			} else {
-				bodyText = "Body (JSON) (Enter to edit):"
+				bodyText = fmt.Sprintf("Body (%s) (Enter to edit · b: cycle):", bodyKindLabel(m.bodyKind))
 			}
 		}
 		reqLines = append(reqLines, bodyHeaderStyle.Render(fmt.Sprintf("%s%s", bodyPrefix, bodyText)))
 		reqLines = append(reqLines, m.bodyInput.View())
+
+		if m.bodyKind.normalized() == BodyMultipart {
+			m.fileFieldInput.Prompt = "  "
+			fileFieldPrefix := "  "
+			fileFieldStyle := headingStyle
+			if !m.focusRight && m.focusIdx == m.fileFieldIdx() {
+				fileFieldPrefix = "> "
+				fileFieldStyle = selectedStyle
+			}
+			reqLines = append(reqLines, fileFieldStyle.Render(fmt.Sprintf("%sFile field:", fileFieldPrefix)))
+			reqLines = append(reqLines, m.fileFieldInput.View())
+
+			m.filePathInput.Prompt = "  "
+			filePathPrefix := "  "
+			filePathStyle := headingStyle
+			if !m.focusRight && m.focusIdx == m.filePathIdx() {
+				filePathPrefix = "> "
+				filePathStyle = selectedStyle
+			}
+			reqLines = append(reqLines, filePathStyle.Render(fmt.Sprintf("%sFile path (blank = fields only):", filePathPrefix)))
+			reqLines = append(reqLines, m.filePathInput.View())
+		}
 	}
 
 	var flatLines []string
@@ -1494,8 +1960,15 @@ func wrapLine(line string, width int) []string {
 }
 
 func (m APIModel) responseLinesCount(width int) int {
-	if m.statusCode <= 0 {
+	if m.statusCode <= 0 && m.responseErr == "" {
 		return 0
+	}
+	if m.responseErr != "" {
+		count := 3 // status, empty, [Error]
+		for _, line := range strings.Split(m.responseErr, "\n") {
+			count += len(wrapLine(line, width-4))
+		}
+		return count
 	}
 	count := 6 // status, latency, empty, [Headers], empty, [Body]
 	for k, v := range m.responseHeaders {
@@ -1532,6 +2005,23 @@ func (m APIModel) rightResponseView(height int, width int) string {
 
 	if m.loading {
 		respLines = append(respLines, faintStyle.Render("  Sending request..."))
+	} else if m.responseErr != "" {
+		failureStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
+		respLines = append(respLines,
+			fmt.Sprintf("  Status:  %s", failureStyle.Render("request failed")),
+			"",
+			headingStyle.Render("  [Error]"),
+		)
+		for _, line := range strings.Split(strings.ReplaceAll(m.responseErr, "\r", ""), "\n") {
+			wrapped := wrapLine(line, width-4)
+			for _, wl := range wrapped {
+				highlighted := wl
+				if m.responseSearchVal != "" {
+					highlighted = highlightMatches(wl, m.responseSearchVal)
+				}
+				respLines = append(respLines, "    "+highlighted)
+			}
+		}
 	} else if m.statusCode > 0 {
 		statusColor := "2"
 		if m.statusCode >= 400 {
@@ -2021,6 +2511,10 @@ func StartAPI(endpoints []frameworks.Endpoint, config APIConfig, g *graph.Graph,
 		rightTab:          rTab,
 	}
 	model.bodyInput = textarea.New()
+	model.fileFieldInput = textinput.New()
+	model.filePathInput = textinput.New()
+	model.bodyKind = BodyJSON
+	model.refreshCaches()
 
 	for {
 		p := tea.NewProgram(&model, tea.WithAltScreen())

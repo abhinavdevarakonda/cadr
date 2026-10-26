@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/abhinavdevarakonda/cadr/internal/analyzer"
 	"github.com/abhinavdevarakonda/cadr/internal/frameworks"
@@ -27,18 +29,7 @@ func runAPICmd(path string, globalMode bool) {
 		} else {
 			scan, err := analyzer.Scan(path)
 			if err == nil {
-				flaskEps, err := frameworks.DetectFlaskEndpoints(scan.Files)
-				if err == nil {
-					endpoints = append(endpoints, flaskEps...)
-				}
-				fastapiEps, err := frameworks.DetectFastAPIEndpoints(scan.Files)
-				if err == nil {
-					endpoints = append(endpoints, fastapiEps...)
-				}
-				ginEps, err := frameworks.DetectGinEndpoints(scan.Files)
-				if err == nil {
-					endpoints = append(endpoints, ginEps...)
-				}
+				endpoints = frameworks.DetectAll(scan.Files)
 			}
 		}
 
@@ -82,10 +73,12 @@ func loadAPIConfig(root string) tui.APIConfig {
 	}
 
 	cfg := tui.APIConfig{
-		DefaultURL: "http://localhost:5000",
-		FlaskURL:   "http://localhost:5000",
-		FastAPIURL: "http://localhost:8081",
-		GinURL:     defaultGinURL,
+		DefaultURL:     "http://localhost:5000",
+		FlaskURL:       "http://localhost:5000",
+		FastAPIURL:     "http://localhost:8081",
+		GinURL:         defaultGinURL,
+		NodeURL:        "http://localhost:3000",
+		RequestTimeout: 10 * time.Second,
 	}
 
 	cfgPath := filepath.Join(root, ".cadr", "config.yaml")
@@ -122,6 +115,15 @@ func loadAPIConfig(root string) tui.APIConfig {
 			cfg.FastAPIURL = val
 		case "gin_api_url":
 			cfg.GinURL = val
+		case "node_api_url":
+			cfg.NodeURL = val
+		case "api_timeout":
+			timeout, ok := parseAPITimeout(val)
+			if !ok {
+				fmt.Fprintf(os.Stderr, "cadr: ignoring invalid api_timeout %q (expected 30s, 30, or 30000ms); using 10s\n", val)
+				continue
+			}
+			cfg.RequestTimeout = timeout
 		}
 	}
 
@@ -129,9 +131,32 @@ func loadAPIConfig(root string) tui.APIConfig {
 		cfg.FlaskURL = cfg.DefaultURL
 		cfg.FastAPIURL = cfg.DefaultURL
 		cfg.GinURL = cfg.DefaultURL
+		cfg.NodeURL = cfg.DefaultURL
 	}
 
 	return cfg
+}
+
+// parseAPITimeout accepts `30s`, a bare number of seconds (`30`), or any Go
+// duration (`30000ms`). Invalid or non-positive values keep the default.
+func parseAPITimeout(val string) (time.Duration, bool) {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return 0, false
+	}
+
+	if d, err := time.ParseDuration(val); err == nil {
+		if d <= 0 {
+			return 0, false
+		}
+		return d, true
+	}
+
+	seconds, err := strconv.Atoi(val)
+	if err != nil || seconds <= 0 {
+		return 0, false
+	}
+	return time.Duration(seconds) * time.Second, true
 }
 
 type ExternalEndpointRecord struct {
@@ -276,19 +301,7 @@ func runLocalAPIList() {
 			os.Exit(1)
 		}
 
-		endpoints, err = frameworks.DetectFlaskEndpoints(scan.Files)
-		if err != nil {
-			fmt.Printf("Error detecting Flask endpoints: %v\n", err)
-			os.Exit(1)
-		}
-
-		fastapiEndpoints, err := frameworks.DetectFastAPIEndpoints(scan.Files)
-		if err != nil {
-			fmt.Printf("Error detecting FastAPI endpoints: %v\n", err)
-			os.Exit(1)
-		}
-
-		endpoints = append(endpoints, fastapiEndpoints...)
+		endpoints = frameworks.DetectAll(scan.Files)
 	}
 
 	if len(endpoints) == 0 {

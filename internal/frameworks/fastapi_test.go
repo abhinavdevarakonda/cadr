@@ -40,18 +40,6 @@ def create_track(track_id: str):
 		t.Fatalf("failed to write test python file: %v", err)
 	}
 
-	if err := os.MkdirAll("queries", 0755); err != nil {
-		t.Fatalf("failed to create queries dir: %v", err)
-	}
-	qData, err := os.ReadFile("../../queries/fastapi.scm")
-	if err != nil {
-		t.Fatalf("failed to read source query file: %v", err)
-	}
-	if err := os.WriteFile("queries/fastapi.scm", qData, 0644); err != nil {
-		t.Fatalf("failed to write package queries/fastapi.scm: %v", err)
-	}
-	defer os.RemoveAll("queries")
-
 	endpoints, err := DetectFastAPIEndpoints([]string{tmpFile})
 	if err != nil {
 		t.Fatalf("endpoint detection failed: %v", err)

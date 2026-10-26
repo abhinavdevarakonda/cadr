@@ -41,22 +41,6 @@ def create_track(track_id):
 		t.Fatalf("failed to write test python file: %v", err)
 	}
 
-	// Change queries directory reference locally so the query can be found
-	// (usually it is relative to project root, so running go test from this package needs a way to find it)
-	// We can copy the query file temporarily to package-local queries/flask.scm
-	if err := os.MkdirAll("queries", 0755); err != nil {
-		t.Fatalf("failed to create queries dir: %v", err)
-	}
-	// Copy queries/flask.scm from project root to internal/frameworks/queries/flask.scm
-	qData, err := os.ReadFile("../../queries/flask.scm")
-	if err != nil {
-		t.Fatalf("failed to read source query file: %v", err)
-	}
-	if err := os.WriteFile("queries/flask.scm", qData, 0644); err != nil {
-		t.Fatalf("failed to write package queries/flask.scm: %v", err)
-	}
-	defer os.RemoveAll("queries")
-
 	endpoints, err := DetectFlaskEndpoints([]string{tmpFile})
 	if err != nil {
 		t.Fatalf("endpoint detection failed: %v", err)

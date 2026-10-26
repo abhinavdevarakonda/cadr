@@ -49,18 +49,6 @@ func main() {
 		t.Fatalf("failed to write test go file: %v", err)
 	}
 
-	if err := os.MkdirAll("queries", 0755); err != nil {
-		t.Fatalf("failed to create queries dir: %v", err)
-	}
-	qData, err := os.ReadFile("../../queries/gin.scm")
-	if err != nil {
-		t.Fatalf("failed to read source query file: %v", err)
-	}
-	if err := os.WriteFile("queries/gin.scm", qData, 0644); err != nil {
-		t.Fatalf("failed to write package queries/gin.scm: %v", err)
-	}
-	defer os.RemoveAll("queries")
-
 	endpoints, err := DetectGinEndpoints([]string{tmpFile})
 	if err != nil {
 		t.Fatalf("endpoint detection failed: %v", err)
@@ -162,18 +150,6 @@ func main() {
 		t.Fatalf("failed to write test go file: %v", err)
 	}
 
-	if err := os.MkdirAll("queries", 0755); err != nil {
-		t.Fatalf("failed to create queries dir: %v", err)
-	}
-	qData, err := os.ReadFile("../../queries/gin.scm")
-	if err != nil {
-		t.Fatalf("failed to read source query file: %v", err)
-	}
-	if err := os.WriteFile("queries/gin.scm", qData, 0644); err != nil {
-		t.Fatalf("failed to write package queries/gin.scm: %v", err)
-	}
-	defer os.RemoveAll("queries")
-
 	endpoints, err := DetectGinEndpoints([]string{tmpFile})
 	if err != nil {
 		t.Fatalf("endpoint detection failed: %v", err)
@@ -202,5 +178,33 @@ func main() {
 
 	if _, ok := routeMap["POST /api/v2/profile"]; !ok {
 		t.Errorf("missing POST /api/v2/profile")
+	}
+}
+
+func TestGinAnyExpandsToConcreteMethods(t *testing.T) {
+	goCode := `package main
+
+import "github.com/gin-gonic/gin"
+
+func main() {
+	r := gin.Default()
+	r.Any("/catch-all", handleAny)
+}
+`
+	tmpFile := writeNodeFixture(t, "main.go", goCode)
+
+	endpoints, err := DetectGinEndpoints([]string{tmpFile})
+	if err != nil {
+		t.Fatalf("endpoint detection failed: %v", err)
+	}
+
+	routes := endpointMap(endpoints)
+	for _, method := range []string{"GET", "POST", "PUT", "PATCH", "DELETE"} {
+		if _, ok := routes[method+" /catch-all"]; !ok {
+			t.Errorf("missing %s /catch-all (got %+v)", method, endpoints)
+		}
+	}
+	if len(endpoints) != 5 {
+		t.Fatalf("expected 5 endpoints, got %d: %+v", len(endpoints), endpoints)
 	}
 }

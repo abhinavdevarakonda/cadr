@@ -1,13 +1,10 @@
 package frameworks
 
 import (
-	"context"
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
 
-	"github.com/abhinavdevarakonda/cadr/queries"
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/golang"
 )
@@ -22,19 +19,22 @@ var ginSupportedMethods = map[string]string{
 	"PATCH":   "PATCH",
 	"OPTIONS": "OPTIONS",
 	"HEAD":    "HEAD",
-	"Any":     "ANY",
 }
 
 // DetectGinEndpoints scans the given Go files for Gin route registrations.
 func DetectGinEndpoints(files []string) ([]Endpoint, error) {
+	// Gate before indexing: a project without Gin gets no extra Go parses. The
+	// gate is loose (any "gin" substring) on purpose: files that declare the
+	// constants (`consts.go`) do not import Gin themselves.
+	if !projectMentions(files, "gin") {
+		return nil, nil
+	}
+
 	var endpoints []Endpoint
 
-	queryBytes, err := os.ReadFile("queries/gin.scm")
+	queryBytes, err := loadQuery("gin.scm")
 	if err != nil {
-		queryBytes, err = queries.Files.ReadFile("gin.scm")
-		if err != nil {
-			return nil, fmt.Errorf("failed to read gin query: %w", err)
-		}
+		return nil, err
 	}
 
 	language := golang.GetLanguage()
@@ -44,11 +44,16 @@ func DetectGinEndpoints(files []string) ([]Endpoint, error) {
 	}
 	defer query.Close()
 
+	index := newGoIndex(files, "")
 	for _, file := range files {
 		if !strings.HasSuffix(file, ".go") {
 			continue
 		}
-		fileEndpoints, err := detectFileGinEndpoints(query, file)
+		module := index.files[cleanNodePath(file)]
+		if module == nil {
+			continue
+		}
+		fileEndpoints, err := detectFileGinEndpoints(query, module, index)
 		if err != nil {
 			continue
 		}
@@ -58,33 +63,22 @@ func DetectGinEndpoints(files []string) ([]Endpoint, error) {
 	return endpoints, nil
 }
 
-func detectFileGinEndpoints(query *sitter.Query, path string) ([]Endpoint, error) {
-	source, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
+func detectFileGinEndpoints(query *sitter.Query, module *goFile, index *goIndex) ([]Endpoint, error) {
+	source := module.source
+	path := module.path
 
-	sourceStr := string(source)
-	if !strings.Contains(sourceStr, "gin") {
+	if !strings.Contains(string(source), "gin") {
 		return nil, nil
 	}
 
-	parser := sitter.NewParser()
-	parser.SetLanguage(golang.GetLanguage())
-
-	tree, err := parser.ParseCtx(context.Background(), nil, source)
-	if err != nil {
-		return nil, err
-	}
-	defer tree.Close()
-
 	qc := sitter.NewQueryCursor()
 	defer qc.Close()
-	qc.Exec(query, tree.RootNode())
+	qc.Exec(query, module.root)
 
-	// 1. Collect file-level constants and variables (e.g. const ApiPrefix = "/api/v1")
-	consts := make(map[string]string)
-	extractStringConstants(tree.RootNode(), source, consts)
+	// Package-level constants come from the project index (any file in the
+	// package); locals are resolved on top of them.
+	evaluator := index.evaluator(module)
+	evaluator.collectLocalConsts()
 
 	// 2. groups maps router variable names to their cumulative route prefix (e.g. "v1" -> "/api/v1")
 	groups := make(map[string]string)
@@ -103,7 +97,7 @@ func detectFileGinEndpoints(query *sitter.Query, path string) ([]Endpoint, error
 			break
 		}
 
-		var routerVar, method, groupVar, parentRouter string
+		var routerVar, method, groupVar, groupCall, parentRouter string
 		var argsNode, callNode, groupArgsNode *sitter.Node
 
 		for _, capture := range match.Captures {
@@ -123,12 +117,19 @@ func detectFileGinEndpoints(query *sitter.Query, path string) ([]Endpoint, error
 				parentRouter = capture.Node.Content(source)
 			case "group_args":
 				groupArgsNode = capture.Node
+			case "group_call":
+				groupCall = capture.Node.Content(source)
 			}
 		}
 
 		// Handle route group creation: v1 := router.Group("/api/v1") or router.Group(ApiPrefix)
-		if groupVar != "" && groupArgsNode != nil {
-			prefix := extractFirstStringArg(groupArgsNode, source, consts)
+		// go-tree-sitter does not evaluate #eq? predicates, so the call name is
+		// checked here; without it `r := gin.Default()` would look like a group.
+		if groupVar != "" && groupArgsNode != nil && groupCall == "Group" {
+			prefix, ok := evaluator.value(nodeArg(groupArgsNode, 0))
+			if !ok {
+				prefix = placeholderToken(nodeContent(nodeArg(groupArgsNode, 0), source), nodeLine(nodeArg(groupArgsNode, 0)))
+			}
 			if parentPrefix, exists := groups[parentRouter]; exists {
 				prefix = joinPath(parentPrefix, prefix)
 			}
@@ -145,21 +146,30 @@ func detectFileGinEndpoints(query *sitter.Query, path string) ([]Endpoint, error
 
 	var fileEndpoints []Endpoint
 	for _, rr := range rawRoutes {
-		normMethod, isSupported := ginSupportedMethods[rr.method]
+		methods := expandRouteMethods(rr.method)
 		isStatic := (rr.method == "Static" || rr.method == "StaticFile")
-		if !isSupported && !isStatic {
+		if len(methods) == 0 && !isStatic {
 			continue
 		}
 
-		routePath := extractFirstStringArg(rr.argsNode, source, consts)
+		routePath, resolved := evaluator.value(nodeArg(rr.argsNode, 0))
+		if !resolved {
+			routePath = placeholderToken(nodeContent(nodeArg(rr.argsNode, 0), source), nodeLine(nodeArg(rr.argsNode, 0)))
+		}
 		if routePath == "" && !strings.Contains(rr.argsNode.Content(source), `""`) {
 			// If not an explicit empty string, skip malformed call
 			continue
 		}
 
-		// Apply group prefix if router variable was a registered group
+		// Apply group prefix if router variable was a registered group. Gin's
+		// joinPaths keeps an empty relative path at the group base, so
+		// books.GET("") is /api/v1/books and not /api/v1/books/.
 		if prefix, exists := groups[rr.routerVar]; exists {
-			routePath = joinPath(prefix, routePath)
+			if routePath == "" {
+				routePath = prefix
+			} else {
+				routePath = joinPath(prefix, routePath)
+			}
 		}
 		if routePath == "" {
 			routePath = "/"
@@ -170,7 +180,7 @@ func detectFileGinEndpoints(query *sitter.Query, path string) ([]Endpoint, error
 		// Extract handler name (last argument in the argument list)
 		handlerName := extractLastArgHandler(rr.argsNode, source)
 		if isStatic {
-			normMethod = "GET"
+			methods = []string{"GET"}
 			if rr.method == "StaticFile" {
 				handlerName = "gin.StaticFile(" + extractSecondStringArg(rr.argsNode, source) + ")"
 			} else {
@@ -178,97 +188,22 @@ func detectFileGinEndpoints(query *sitter.Query, path string) ([]Endpoint, error
 			}
 		}
 
-		params := extractGinPathParams(routePath)
+		params := mergePathParams(extractGinPathParams(routePath), unresolvedParams(routePath))
 
-		fileEndpoints = append(fileEndpoints, Endpoint{
-			Method:      normMethod,
-			Path:        routePath,
-			HandlerFunc: handlerName,
-			File:        path,
-			Line:        int(rr.callNode.StartPoint().Row) + 1,
-			Framework:   "gin",
-			PathParams:  params,
-		})
+		for _, normMethod := range methods {
+			fileEndpoints = append(fileEndpoints, Endpoint{
+				Method:      normMethod,
+				Path:        routePath,
+				HandlerFunc: handlerName,
+				File:        path,
+				Line:        int(rr.callNode.StartPoint().Row) + 1,
+				Framework:   "gin",
+				PathParams:  params,
+			})
+		}
 	}
 
 	return fileEndpoints, nil
-}
-
-func extractStringConstants(node *sitter.Node, source []byte, consts map[string]string) {
-	if node == nil {
-		return
-	}
-	switch node.Type() {
-	case "const_spec", "var_spec":
-		nameNode := node.ChildByFieldName("name")
-		valNode := node.ChildByFieldName("value")
-		if nameNode != nil && valNode != nil {
-			val := extractNodeStringValue(valNode, source, consts)
-			if val != "" {
-				consts[nameNode.Content(source)] = val
-			}
-		}
-	case "short_var_declaration":
-		leftNode := node.ChildByFieldName("left")
-		rightNode := node.ChildByFieldName("right")
-		if leftNode != nil && rightNode != nil {
-			varNames := leftNode.NamedChildCount()
-			varValues := rightNode.NamedChildCount()
-			if varNames == 1 && varValues == 1 {
-				val := extractNodeStringValue(rightNode.NamedChild(0), source, consts)
-				if val != "" && !strings.HasPrefix(val, "[") {
-					consts[leftNode.NamedChild(0).Content(source)] = val
-				}
-			}
-		}
-	}
-
-	for i := 0; i < int(node.NamedChildCount()); i++ {
-		extractStringConstants(node.NamedChild(i), source, consts)
-	}
-}
-
-func extractNodeStringValue(node *sitter.Node, source []byte, consts map[string]string) string {
-	if node == nil {
-		return ""
-	}
-	switch node.Type() {
-	case "interpreted_string_literal", "raw_string_literal":
-		raw := node.Content(source)
-		if (strings.HasPrefix(raw, "\"") && strings.HasSuffix(raw, "\"")) ||
-			(strings.HasPrefix(raw, "`") && strings.HasSuffix(raw, "`")) {
-			if len(raw) >= 2 {
-				return raw[1 : len(raw)-1]
-			}
-		}
-		return raw
-	case "identifier":
-		name := node.Content(source)
-		if v, ok := consts[name]; ok {
-			return v
-		}
-		return "[" + name + "]"
-	case "binary_expression":
-		left := extractNodeStringValue(node.ChildByFieldName("left"), source, consts)
-		right := extractNodeStringValue(node.ChildByFieldName("right"), source, consts)
-		return left + right
-	case "expression_list":
-		if node.NamedChildCount() > 0 {
-			return extractNodeStringValue(node.NamedChild(0), source, consts)
-		}
-	}
-	return ""
-}
-
-func extractFirstStringArg(argsNode *sitter.Node, source []byte, consts map[string]string) string {
-	for i := 0; i < int(argsNode.NamedChildCount()); i++ {
-		child := argsNode.NamedChild(i)
-		val := extractNodeStringValue(child, source, consts)
-		if val != "" {
-			return val
-		}
-	}
-	return ""
 }
 
 func extractSecondStringArg(argsNode *sitter.Node, source []byte) string {

@@ -186,8 +186,9 @@ Core controls:
   - Dynamic Tracing: Process-wide tracking via `-overlay` / `-toolexec` compiler toolchain interception.
   - Frameworks: Gin (`gin-gonic/gin`) route groups, parameters, and handler mapping.
 - **JavaScript / TypeScript**
-  - Static Graph: Function declarations, arrow functions, class methods.
+  - Static Graph: Function declarations, arrow functions, class methods (`.ts`/`.tsx` parsed with the TypeScript grammars).
   - Dynamic Tracing: entry-only call events via NODE_OPTIONS (regex source instrumentation; no durations/call tree yet).
+  - Frameworks: Express, Fastify, and Koa-router routes — verbs, `app.all`, `app.use`/`fastify.register` prefixes, array paths, and const/concat paths. NestJS is not yet supported.
 - **C / C++**
   - Static Graph: Functions, declarations, and call references.
   - Dynamic Tracing: In roadmap (`-finstrument-functions`).
@@ -208,9 +209,12 @@ cadr api
 ```
 
 Key features:
-- **Automatic Route Discovery:** Statically scans Gin, FastAPI, and Flask routes without running the server.
+- **Automatic Route Discovery:** Statically scans Gin, FastAPI, Flask, and JavaScript/TypeScript backends (Express, Fastify, Koa-router) without running the server.
 - **Path and Query Parameter Handling:** Automatically substitutes path parameters (`:id`, `{user_id}`, `<int:id>`) from inputs.
-- **Persistent Input Caching:** Headers, parameters, and request body payloads are saved per-endpoint in `.cadr/cache/api_cache.json`.
+- **Cross-File Path Constants:** Route paths built from imported constants (`require`/`import`, Go package constants, Python `from x import Y`, `os.getenv` defaults, template/f-strings) resolve to the real prefix; anything still unresolved becomes a `[NAME]` field you fill in once.
+- **Request Body Modes:** `b` cycles JSON → form-urlencoded → multipart file upload → raw, so upload and form endpoints work without leaving the TUI.
+- **Persistent Input Caching:** Headers, parameters, body mode, and request body payloads are saved per-endpoint in `.cadr/cache/api_cache.json`.
+- **Configurable Timeout:** `api_timeout` in `.cadr/config.yaml` (default 10s) and per-framework base URLs including `node_api_url`.
 - **Side-by-Side Call Graph:** Inspect the exact backend function call tree alongside the raw HTTP response.
 - **Send and Copy:** `Ctrl+s` sends the request. `y` copies the response payload to your system clipboard.
 

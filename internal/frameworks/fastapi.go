@@ -1,13 +1,11 @@
 package frameworks
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"regexp"
 	"strings"
 
-	"github.com/abhinavdevarakonda/cadr/queries"
 	sitter "github.com/smacker/go-tree-sitter"
 	tree_sitter_python "github.com/smacker/go-tree-sitter/python"
 )
@@ -15,16 +13,16 @@ import (
 var fastapiParamRegex = regexp.MustCompile(`{([a-zA-Z_]\w*)(?::([a-zA-Z_]\w*))?}`)
 
 func DetectFastAPIEndpoints(files []string) ([]Endpoint, error) {
+	// Gate before indexing: a project without FastAPI gets no extra parses.
+	if !projectMentions(files, "fastapi", "FastAPI") {
+		return nil, nil
+	}
+
 	var endpoints []Endpoint
 
-	var queryBytes []byte
-	var err error
-	queryBytes, err = os.ReadFile("queries/fastapi.scm")
+	queryBytes, err := loadQuery("fastapi.scm")
 	if err != nil {
-		queryBytes, err = queries.Files.ReadFile("fastapi.scm")
-		if err != nil {
-			return nil, fmt.Errorf("failed to read fastapi query: %w", err)
-		}
+		return nil, err
 	}
 
 	language := tree_sitter_python.GetLanguage()
@@ -35,20 +33,36 @@ func DetectFastAPIEndpoints(files []string) ([]Endpoint, error) {
 	defer query.Close()
 
 	prefixes := getFastAPIMountPrefixes(files)
+	index := newPyIndex(files)
+	includePrefixes := collectFastAPIIncludePrefixes(index)
 
 	for _, file := range files {
 		if !strings.HasSuffix(file, ".py") {
 			continue
 		}
-		fileEndpoints, err := detectFileFastAPIEndpoints(query, file)
+		fileEndpoints, err := detectFileFastAPIEndpoints(query, file, index)
 		if err != nil {
 			continue
 		}
 
-		if prefix, exists := prefixes[file]; exists {
-			for i := range fileEndpoints {
-				fileEndpoints[i].Path = joinPath(prefix, fileEndpoints[i].Path)
+		mountPrefix, hasMount := prefixes[file]
+		includePrefix, hasInclude := includePrefixes[cleanNodePath(file)]
+		for i := range fileEndpoints {
+			ep := &fileEndpoints[i]
+			if hasMount {
+				ep.Path = joinPrefixPath(mountPrefix, ep.Path)
 			}
+			if hasInclude {
+				ep.Path = joinPrefixPath(includePrefix, ep.Path)
+			}
+			if ep.Path == "" {
+				ep.Path = "/"
+			} else if !strings.HasPrefix(ep.Path, "/") {
+				ep.Path = "/" + ep.Path
+			}
+			// A prefix that could not be resolved ([settings.api_base]) is
+			// fillable, so it has to carry a path param after the joins.
+			ep.PathParams = mergePathParams(ep.PathParams, unresolvedParams(ep.Path))
 		}
 
 		endpoints = append(endpoints, fileEndpoints...)
@@ -57,29 +71,81 @@ func DetectFastAPIEndpoints(files []string) ([]Endpoint, error) {
 	return endpoints, nil
 }
 
-func detectFileFastAPIEndpoints(query *sitter.Query, path string) ([]Endpoint, error) {
-	source, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
+// joinPrefixPath mirrors FastAPI: an empty route path under a prefix is the
+// prefix itself, never prefix + "/". Nothing to join leaves the path empty; the
+// caller turns a still-empty path into "/".
+func joinPrefixPath(prefix, path string) string {
+	if path == "" {
+		return prefix
+	}
+	return joinPath(prefix, path)
+}
+
+// collectFastAPIIncludePrefixes maps a router module (file) to the prefix it is
+// included under: `app.include_router(routes_books.router, prefix=...)` in one
+// file applies to the decorators in routes_books.py. Only module-alias targets
+// (`module.router`) are followed; same-file includes are handled per file.
+func collectFastAPIIncludePrefixes(index *pyIndex) map[string]string {
+	prefixes := make(map[string]string)
+
+	for _, module := range index.files {
+		evaluator := index.evaluator(module)
+		nodeWalk(module.root, func(node *sitter.Node) {
+			if node.Type() != "call" {
+				return
+			}
+			function := node.ChildByFieldName("function")
+			arguments := node.ChildByFieldName("arguments")
+			if function == nil || arguments == nil || function.Type() != "attribute" {
+				return
+			}
+			attribute := function.ChildByFieldName("attribute")
+			if attribute == nil || attribute.Content(module.source) != "include_router" {
+				return
+			}
+			first := arguments.NamedChild(0)
+			if first == nil || first.Type() != "attribute" {
+				return
+			}
+			object := first.ChildByFieldName("object")
+			if object == nil || object.Type() != "identifier" {
+				return
+			}
+			binding, ok := index.binds[module.path][object.Content(module.source)]
+			if !ok || binding.module == "" || binding.key != "" {
+				return
+			}
+			prefix, present := getKeywordArgValue(arguments, "prefix", evaluator)
+			if !present || prefix == "" {
+				return
+			}
+			if existing, seen := prefixes[binding.module]; seen {
+				prefixes[binding.module] = joinPath(existing, prefix)
+				return
+			}
+			prefixes[binding.module] = prefix
+		})
 	}
 
-	sourceStr := string(source)
-	if !strings.Contains(sourceStr, "fastapi") && !strings.Contains(sourceStr, "FastAPI") {
+	return prefixes
+}
+
+func detectFileFastAPIEndpoints(query *sitter.Query, path string, index *pyIndex) ([]Endpoint, error) {
+	module := index.files[cleanNodePath(path)]
+	if module == nil {
+		return nil, nil
+	}
+	source := module.source
+
+	if !strings.Contains(string(source), "fastapi") && !strings.Contains(string(source), "FastAPI") {
 		return nil, nil
 	}
 
-	parser := sitter.NewParser()
-	parser.SetLanguage(tree_sitter_python.GetLanguage())
-
-	tree, err := parser.ParseCtx(context.Background(), nil, source)
-	if err != nil {
-		return nil, err
-	}
-	defer tree.Close()
+	evaluator := index.evaluator(module)
 
 	qc := sitter.NewQueryCursor()
 	defer qc.Close()
-	qc.Exec(query, tree.RootNode())
+	qc.Exec(query, module.root)
 
 	routers := make(map[string]string) // e.g. router -> "/users"
 	type rawDecorator struct {
@@ -118,7 +184,7 @@ func detectFileFastAPIEndpoints(query *sitter.Query, path string) ([]Endpoint, e
 		}
 
 		if varName != "" && funcName == "APIRouter" && argsNode != nil {
-			prefix := getKeywordArgValue(argsNode, "prefix", source)
+			prefix, _ := getKeywordArgValue(argsNode, "prefix", evaluator)
 			routers[varName] = prefix
 		} else if decNode != nil && argsNode != nil {
 			rawDecorators = append(rawDecorators, rawDecorator{
@@ -129,6 +195,34 @@ func detectFileFastAPIEndpoints(query *sitter.Query, path string) ([]Endpoint, e
 			})
 		}
 	}
+
+	// app.include_router(router, prefix=...) adds its prefix to routes that were
+	// registered on a router in this same file. Cross-file includes are handled
+	// by collectFastAPIIncludePrefixes.
+	nodeWalk(module.root, func(node *sitter.Node) {
+		if node.Type() != "call" {
+			return
+		}
+		function := node.ChildByFieldName("function")
+		arguments := node.ChildByFieldName("arguments")
+		if function == nil || arguments == nil || function.Type() != "attribute" {
+			return
+		}
+		attribute := function.ChildByFieldName("attribute")
+		if attribute == nil || attribute.Content(source) != "include_router" {
+			return
+		}
+		first := arguments.NamedChild(0)
+		if first == nil || first.Type() != "identifier" {
+			return
+		}
+		name := first.Content(source)
+		prefix, present := getKeywordArgValue(arguments, "prefix", evaluator)
+		if !present {
+			return
+		}
+		routers[name] = joinPrefixPath(prefix, routers[name])
+	})
 
 	var fileEndpoints []Endpoint
 	for _, rd := range rawDecorators {
@@ -143,11 +237,14 @@ func detectFileFastAPIEndpoints(query *sitter.Query, path string) ([]Endpoint, e
 		}
 		handlerName := funcNameNode.Content(source)
 
-		routePath := getFirstPositionalArg(rd.argsNode, source)
+		routePath, ok := getFirstPositionalArg(rd.argsNode, evaluator)
+		if !ok {
+			continue
+		}
 
-		// Apply APIRouter prefix
+		// Apply APIRouter prefix (an empty decorator path is the prefix itself).
 		if prefix, exists := routers[rd.appVar]; exists {
-			routePath = joinPath(prefix, routePath)
+			routePath = joinPrefixPath(prefix, routePath)
 		}
 
 		var methods []string
@@ -163,8 +260,8 @@ func detectFileFastAPIEndpoints(query *sitter.Query, path string) ([]Endpoint, e
 			continue
 		}
 
-		params := extractFastAPIPathParams(routePath)
 		normalizedPath := normalizeFastAPIPath(routePath)
+		params := mergePathParams(extractFastAPIPathParams(routePath), unresolvedParams(normalizedPath))
 
 		for _, method := range methods {
 			fileEndpoints = append(fileEndpoints, Endpoint{

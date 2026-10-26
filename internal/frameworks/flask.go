@@ -1,13 +1,10 @@
 package frameworks
 
 import (
-	"context"
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
 
-	"github.com/abhinavdevarakonda/cadr/queries"
 	sitter "github.com/smacker/go-tree-sitter"
 	tree_sitter_python "github.com/smacker/go-tree-sitter/python"
 )
@@ -15,16 +12,16 @@ import (
 var flaskParamRegex = regexp.MustCompile(`<(?:([a-zA-Z_]\w*):)?([a-zA-Z_]\w*)>`)
 
 func DetectFlaskEndpoints(files []string) ([]Endpoint, error) {
+	// Gate before indexing: a project without Flask gets no extra parses.
+	if !projectMentions(files, "flask", "Flask") {
+		return nil, nil
+	}
+
 	var endpoints []Endpoint
 
-	var queryBytes []byte
-	var err error
-	queryBytes, err = os.ReadFile("queries/flask.scm")
+	queryBytes, err := loadQuery("flask.scm")
 	if err != nil {
-		queryBytes, err = queries.Files.ReadFile("flask.scm")
-		if err != nil {
-			return nil, fmt.Errorf("failed to read flask query: %w", err)
-		}
+		return nil, err
 	}
 
 	language := tree_sitter_python.GetLanguage()
@@ -34,11 +31,12 @@ func DetectFlaskEndpoints(files []string) ([]Endpoint, error) {
 	}
 	defer query.Close()
 
+	index := newPyIndex(files)
 	for _, file := range files {
 		if !strings.HasSuffix(file, ".py") {
 			continue
 		}
-		fileEndpoints, err := detectFileEndpoints(query, file)
+		fileEndpoints, err := detectFileEndpoints(query, file, index)
 		if err != nil {
 			continue
 		}
@@ -48,29 +46,22 @@ func DetectFlaskEndpoints(files []string) ([]Endpoint, error) {
 	return endpoints, nil
 }
 
-func detectFileEndpoints(query *sitter.Query, path string) ([]Endpoint, error) {
-	source, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
+func detectFileEndpoints(query *sitter.Query, path string, index *pyIndex) ([]Endpoint, error) {
+	module := index.files[cleanNodePath(path)]
+	if module == nil {
+		return nil, nil
 	}
+	source := module.source
 
-	sourceStr := string(source)
-	if !strings.Contains(sourceStr, "flask") && !strings.Contains(sourceStr, "Flask") {
+	if !strings.Contains(string(source), "flask") && !strings.Contains(string(source), "Flask") {
 		return nil, nil
 	}
 
-	parser := sitter.NewParser()
-	parser.SetLanguage(tree_sitter_python.GetLanguage())
-
-	tree, err := parser.ParseCtx(context.Background(), nil, source)
-	if err != nil {
-		return nil, err
-	}
-	defer tree.Close()
+	evaluator := index.evaluator(module)
 
 	qc := sitter.NewQueryCursor()
 	defer qc.Close()
-	qc.Exec(query, tree.RootNode())
+	qc.Exec(query, module.root)
 
 	blueprints := make(map[string]string) // e.g. bp -> "/api/v1"
 	type rawDecorator struct {
@@ -109,7 +100,7 @@ func detectFileEndpoints(query *sitter.Query, path string) ([]Endpoint, error) {
 		}
 
 		if varName != "" && funcName == "Blueprint" && argsNode != nil {
-			prefix := getKeywordArgValue(argsNode, "url_prefix", source)
+			prefix, _ := getKeywordArgValue(argsNode, "url_prefix", evaluator)
 			blueprints[varName] = prefix
 		} else if decNode != nil && argsNode != nil {
 			rawDecorators = append(rawDecorators, rawDecorator{
@@ -134,7 +125,10 @@ func detectFileEndpoints(query *sitter.Query, path string) ([]Endpoint, error) {
 		}
 		handlerName := funcNameNode.Content(source)
 
-		routePath := getFirstPositionalArg(rd.argsNode, source)
+		routePath, ok := getFirstPositionalArg(rd.argsNode, evaluator)
+		if !ok {
+			continue
+		}
 
 		// Apply blueprint prefix
 		if prefix, exists := blueprints[rd.appVar]; exists {
@@ -154,7 +148,7 @@ func detectFileEndpoints(query *sitter.Query, path string) ([]Endpoint, error) {
 			continue // Skip non-routing decorators (e.g. errorhandler)
 		}
 
-		params := extractPathParams(routePath)
+		params := mergePathParams(extractPathParams(routePath), unresolvedParams(routePath))
 
 		for _, method := range methods {
 			fileEndpoints = append(fileEndpoints, Endpoint{
@@ -172,30 +166,45 @@ func detectFileEndpoints(query *sitter.Query, path string) ([]Endpoint, error) {
 	return fileEndpoints, nil
 }
 
-func getKeywordArgValue(node *sitter.Node, name string, source []byte) string {
-	for i := 0; i < int(node.NamedChildCount()); i++ {
-		child := node.NamedChild(i)
-		if child.Type() == "keyword_argument" {
-			nameNode := child.ChildByFieldName("name")
-			if nameNode != nil && nameNode.Content(source) == name {
-				valNode := child.ChildByFieldName("value")
-				if valNode != nil {
-					return cleanStringLiteral(valNode.Content(source))
-				}
-			}
-		}
-	}
-	return ""
-}
-
-func getFirstPositionalArg(node *sitter.Node, source []byte) string {
+// getKeywordArgValue resolves a keyword argument through the module index.
+// present is false when the keyword is absent; when it is present but cannot be
+// resolved the value is a fillable placeholder.
+func getKeywordArgValue(node *sitter.Node, name string, evaluator *pyEval) (string, bool) {
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
 		if child.Type() != "keyword_argument" {
-			return cleanStringLiteral(child.Content(source))
+			continue
 		}
+		nameNode := child.ChildByFieldName("name")
+		if nameNode == nil || nameNode.Content(evaluator.source) != name {
+			continue
+		}
+		valNode := child.ChildByFieldName("value")
+		if valNode == nil {
+			return "", false
+		}
+		if value, ok := evaluator.value(valNode); ok {
+			return value, true
+		}
+		return placeholderToken(valNode.Content(evaluator.source), int(valNode.StartPoint().Row)+1), true
 	}
-	return ""
+	return "", false
+}
+
+// getFirstPositionalArg resolves the first positional argument of a decorator.
+// Unresolvable arguments become fillable placeholders.
+func getFirstPositionalArg(node *sitter.Node, evaluator *pyEval) (string, bool) {
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		child := node.NamedChild(i)
+		if child.Type() == "keyword_argument" {
+			continue
+		}
+		if value, ok := evaluator.value(child); ok {
+			return value, true
+		}
+		return placeholderToken(child.Content(evaluator.source), int(child.StartPoint().Row)+1), true
+	}
+	return "", false
 }
 
 func getMethodsArg(node *sitter.Node, source []byte) []string {

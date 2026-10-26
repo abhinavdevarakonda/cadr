@@ -11,14 +11,28 @@ import (
 	tree_sitter_javascript "github.com/smacker/go-tree-sitter/javascript"
 )
 
-type JSConfig struct{}
+type JSConfig struct {
+	grammar *sitter.Language
+}
 
 func NewJSConfig() *JSConfig {
-	return &JSConfig{}
+	return &JSConfig{grammar: tree_sitter_javascript.GetLanguage()}
+}
+
+// NewJSConfigWithGrammar allows the .ts/.tsx files to be parsed with the
+// TypeScript grammar, so annotations and interfaces do not degrade the graph.
+func NewJSConfigWithGrammar(grammar *sitter.Language) *JSConfig {
+	if grammar == nil {
+		grammar = tree_sitter_javascript.GetLanguage()
+	}
+	return &JSConfig{grammar: grammar}
 }
 
 func (c *JSConfig) Grammar() *sitter.Language {
-	return tree_sitter_javascript.GetLanguage()
+	if c == nil || c.grammar == nil {
+		return tree_sitter_javascript.GetLanguage()
+	}
+	return c.grammar
 }
 
 func (c *JSConfig) SymbolQuery() string {
