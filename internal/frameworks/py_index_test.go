@@ -346,3 +346,45 @@ def create_app(settings: Settings) -> FastAPI:
 		t.Errorf("expected one fillable settings.api_base param, got %+v", ep.PathParams)
 	}
 }
+
+func TestFastAPIDoubleIncludedRouterIsFillable(t *testing.T) {
+	paths := writeNodeProject(t, map[string]string{
+		"app/http/routes_books.py": `from fastapi import APIRouter
+
+router = APIRouter()
+
+
+@router.get("/search")
+def search_books():
+    return "books"
+`,
+		"app/main.py": `from fastapi import FastAPI
+
+from app.http import routes_books
+
+
+def create_app() -> FastAPI:
+    app = FastAPI()
+    app.include_router(routes_books.router, prefix="/v1")
+    app.include_router(routes_books.router, prefix="/v2")
+    return app
+`,
+	})
+
+	endpoints, err := DetectFastAPIEndpoints(paths)
+	if err != nil {
+		t.Fatalf("fastapi detection failed: %v", err)
+	}
+	// Two different prefixes for one router: never guess a joined path, keep a
+	// single fillable token instead.
+	if len(endpoints) != 1 {
+		t.Fatalf("expected 1 endpoint, got %+v", endpoints)
+	}
+	ep := endpoints[0]
+	if !strings.Contains(ep.Path, "[include_prefix]") || !strings.HasSuffix(ep.Path, "/search") {
+		t.Errorf("expected a fillable include prefix, got %q", ep.Path)
+	}
+	if len(ep.PathParams) != 1 || ep.PathParams[0].Name != "include_prefix" || ep.PathParams[0].Type != UnresolvedPathParamType {
+		t.Errorf("expected one unresolved include_prefix param, got %+v", ep.PathParams)
+	}
+}

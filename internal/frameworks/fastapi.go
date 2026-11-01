@@ -46,13 +46,19 @@ func DetectFastAPIEndpoints(files []string) ([]Endpoint, error) {
 		}
 
 		mountPrefix, hasMount := prefixes[file]
-		includePrefix, hasInclude := includePrefixes[cleanNodePath(file)]
+		include, hasInclude := includePrefixes[cleanNodePath(file)]
 		for i := range fileEndpoints {
 			ep := &fileEndpoints[i]
 			if hasMount {
 				ep.Path = joinPrefixPath(mountPrefix, ep.Path)
 			}
 			if hasInclude {
+				includePrefix := include.prefix
+				if include.ambiguous {
+					// The same router is included under two different prefixes:
+					// never guess, leave a fillable token.
+					includePrefix = placeholderToken("include_prefix", 0)
+				}
 				ep.Path = joinPrefixPath(includePrefix, ep.Path)
 			}
 			if ep.Path == "" {
@@ -81,12 +87,20 @@ func joinPrefixPath(prefix, path string) string {
 	return joinPath(prefix, path)
 }
 
+// fastAPIIncludePrefix is the prefix one router module is included under. A
+// module included twice under different prefixes is ambiguous: the prefix is
+// not guessed, the caller emits a fillable token instead.
+type fastAPIIncludePrefix struct {
+	prefix    string
+	ambiguous bool
+}
+
 // collectFastAPIIncludePrefixes maps a router module (file) to the prefix it is
 // included under: `app.include_router(routes_books.router, prefix=...)` in one
 // file applies to the decorators in routes_books.py. Only module-alias targets
 // (`module.router`) are followed; same-file includes are handled per file.
-func collectFastAPIIncludePrefixes(index *pyIndex) map[string]string {
-	prefixes := make(map[string]string)
+func collectFastAPIIncludePrefixes(index *pyIndex) map[string]fastAPIIncludePrefix {
+	prefixes := make(map[string]fastAPIIncludePrefix)
 
 	for _, module := range index.files {
 		evaluator := index.evaluator(module)
@@ -120,10 +134,13 @@ func collectFastAPIIncludePrefixes(index *pyIndex) map[string]string {
 				return
 			}
 			if existing, seen := prefixes[binding.module]; seen {
-				prefixes[binding.module] = joinPath(existing, prefix)
+				if existing.prefix != prefix {
+					existing.ambiguous = true
+					prefixes[binding.module] = existing
+				}
 				return
 			}
-			prefixes[binding.module] = prefix
+			prefixes[binding.module] = fastAPIIncludePrefix{prefix: prefix}
 		})
 	}
 
